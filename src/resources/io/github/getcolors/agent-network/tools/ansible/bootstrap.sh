@@ -67,6 +67,12 @@ if [[ ! -s $SECRETS/pat ]]; then
                    --data "$setup_body" 2>/dev/null); then
     setup_pat=$(jq -r '.personal_access_token // empty' <<<"$setup_out")
     [[ -n $setup_pat ]] || { log "FATAL: /api/setup returned no PAT"; exit 1; }
+    # Persisted immediately, short-lived as it is: a crash between here and
+    # the durable exchange must leave a working credential, or every retry
+    # would hit the already-set-up wall below with nothing stored. The
+    # rotation logic further down replaces it with a durable token on the
+    # same run or any later one.
+    persist "$SECRETS/pat" "$setup_pat"
     log "local owner created"
   else
     log "FATAL: this instance is already set up but no automation credential is stored."
@@ -139,9 +145,24 @@ if [[ ${1:-} == --post-enroll ]]; then
       || api DELETE "/setup-keys/$id" >/dev/null 2>&1 || true
     log "setup key $id closed"
   done
+
+  # While the tmpfs copy still exists, its literal value is what must be
+  # absent from anything persistent or inspectable — container config and
+  # bounded logs — not merely the words "setup key".
+  if [[ -s $RUN_SECRET/setup_key ]]; then
+    keyval=$(cat "$RUN_SECRET/setup_key")
+    if docker inspect agent-network-agent 2>/dev/null | grep -qF "$keyval"; then
+      log "FATAL: the setup key value appears in the agent container's configuration"
+      exit 1
+    fi
+    if docker logs --tail 2000 agent-network-agent 2>&1 | grep -qF "$keyval"; then
+      log "FATAL: the setup key value appears in the agent container's logs"
+      exit 1
+    fi
+    unset keyval
+  fi
   rm -f "$RUN_SECRET/setup_key"
 
-  # The key must not have leaked into anything persistent or inspectable.
   if docker inspect agent-network-agent 2>/dev/null | grep -qi 'setup[-_]key'; then
     log "FATAL: the agent container's configuration mentions a setup key"
     exit 1

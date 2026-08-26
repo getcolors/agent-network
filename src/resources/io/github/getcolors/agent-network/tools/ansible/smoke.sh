@@ -204,6 +204,18 @@ if [[ $unattributed != 0 ]]; then
   log "FAIL: $unattributed access-log entries carry no caller identity"
   exit 1
 fi
+# Attribution means the agent's recorded peer identity, not merely "someone":
+# the agent is this deployment's only caller, so every entry must carry its
+# peer id (external denials are dropped before logging and never appear).
+peer_id=$(cat /etc/agent-network/state/agent-peer-id 2>/dev/null || true)
+if [[ -n $peer_id ]]; then
+  foreign=$(jq -r --arg p "$peer_id" \
+    '[.data[] | select(.user_id != $p)] | length' <<<"$logs")
+  if [[ $foreign != 0 ]]; then
+    log "FAIL: $foreign access-log entries are attributed to something other than the agent peer $peer_id"
+    exit 1
+  fi
+fi
 
 log "asserting configured limits match desired state"
 desired=/opt/agent-network/desired.json

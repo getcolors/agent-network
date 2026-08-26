@@ -361,17 +361,37 @@
             ;; tunnel. -k because the endpoint's certificate may legitimately
             ;; still be issuing; what is under test is the deny, not the chain
             ;; (gate 3 inside the tunnel already proved the chain).
-            (let [code (out ["sh" "-c"
-                             (str "curl -sk -o /dev/null -w '%{http_code}' --max-time 20 "
-                                  "-X POST https://" endpoint "/v1/messages "
-                                  "-H 'content-type: application/json' "
-                                  "--data '{\"model\":\"" (validate/allowed-model opts)
-                                  "\",\"max_tokens\":16,\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}'")])]
-              (contains? #{"200"} code))
+            ;; Served means bypassed: a 200 completion OR the relayed
+            ;; upstream 401 both prove the caller's request reached Anthropic
+            ;; through server-side key injection without a tunnel identity.
+            ;; The correct outcome is the proxy's own pre-identity denial
+            ;; (observed: a bare 403), which reaches no upstream and writes no
+            ;; access-log entry.
+            (let [probe (out ["sh" "-c"
+                              (str "curl -sk --max-time 20 -w '\\nHTTPCODE:%{http_code}' "
+                                   "-X POST https://" endpoint "/v1/messages "
+                                   "-H 'content-type: application/json' "
+                                   "--data '{\"model\":\"" (validate/allowed-model opts)
+                                   "\",\"max_tokens\":16,\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}'")])
+                  code (or (second (re-find #"HTTPCODE:(\d+)" probe)) "000")]
+              (or (= code "200")
+                  (and (= code "401") (str/includes? probe "authentication_error"))))
             (assoc opts :green/exit 1
                    :green/err (str "the agent-network endpoint " endpoint
-                                   " served a completion to a caller outside the overlay; "
-                                   "it must be tunnel-only"))
+                                   " served a caller outside the overlay (the request "
+                                   "reached the upstream); it must be tunnel-only"))
+
+            ;; And the probe must have left no unattributed access-log entry:
+            ;; pre-identity denials are dropped before logging, so any entry
+            ;; without a caller identity means something external was served.
+            (let [unattributed
+                  (ssh-out opts
+                           (str "curl -fsS -H \"Authorization: Token $(cat /etc/agent-network/secrets/pat)\" "
+                                "'https://" host "/api/agent-network/access-logs?page=1&page_size=100' "
+                                "| jq -r '[.data[] | select((.user_id // \"\") == \"\")] | length'"))]
+              (not= "0" (str/trim (str unattributed))))
+            (assoc opts :green/exit 1
+                   :green/err "the access log holds entries with no caller identity; an external request was served")
 
             :else
             (assoc opts :green/exit 0
