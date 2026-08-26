@@ -374,12 +374,16 @@
                                    "--data '{\"model\":\"" (validate/allowed-model opts)
                                    "\",\"max_tokens\":16,\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}'")])
                   code (or (second (re-find #"HTTPCODE:(\d+)" probe)) "000")]
-              (or (= code "200")
-                  (and (= code "401") (str/includes? probe "authentication_error"))))
+              ;; Exactly the pre-identity 403, fail-closed: a 200 or the
+              ;; upstream 401 means the caller was served through key
+              ;; injection, and any other status (000, 404, 429, 5xx) means
+              ;; the probe observed something other than the deny it exists
+              ;; to prove.
+              (not= code "403"))
             (assoc opts :green/exit 1
                    :green/err (str "the agent-network endpoint " endpoint
-                                   " served a caller outside the overlay (the request "
-                                   "reached the upstream); it must be tunnel-only"))
+                                   " did not answer an outside caller with the "
+                                   "pre-identity 403; it must be tunnel-only"))
 
             ;; And the probe must have left no unattributed access-log entry:
             ;; pre-identity denials are dropped before logging, so any entry

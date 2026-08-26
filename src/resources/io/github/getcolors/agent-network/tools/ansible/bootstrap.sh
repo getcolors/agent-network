@@ -112,6 +112,20 @@ if [[ -n $me ]]; then
   done
 fi
 
+# A crash between persisting the setup PAT and the durable exchange leaves a
+# working but short-lived credential and no named token; mint the durable one
+# whenever it is missing, with whatever credential is on disk.
+named=$(api GET "/users/$me/tokens" 2>/dev/null | jq -r \
+  '[.[] | select(.name=="colors-automation")] | length' || echo 0)
+if [[ ${named:-0} == 0 ]]; then
+  log "no durable automation token; minting one"
+  fresh=$(api POST "/users/$me/tokens" \
+    "$(jq -nc '{name:"colors-automation", expires_in:365}')" | jq -r '.plain_token // empty')
+  [[ -n $fresh ]] || { log "FATAL: could not create the durable credential"; exit 1; }
+  persist "$SECRETS/pat" "$fresh"
+  unset fresh
+fi
+
 # Rotate before it lapses.
 expiry=$(api GET "/users/$me/tokens" 2>/dev/null | jq -r \
   '[.[] | select(.name=="colors-automation")] | sort_by(.expiration_date) | last | .expiration_date // empty' \
