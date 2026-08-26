@@ -1,0 +1,383 @@
+---
+# Convergence for the Agent Network demo: the gateway stack, the control
+# plane, the isolated agent, and the acceptance gates that make the demo's
+# claims falsifiable.
+#
+# The shape of this play is set by what fails silently here. A green stack
+# proves almost nothing: Traefik answers 443 with a self-signed certificate
+# when ACME has failed, the server image carries no HTTP client so container
+# healthchecks fail closed, the endpoint exists only after an explicit
+# settings bootstrap against a registered proxy, a Docker restart rebuilds
+# DOCKER-USER without the isolation rules, and an agent with quiet internet
+# access would demo nothing while every probe of the happy path still passed.
+# So each stage asks a component what it actually has — and the smoke suite
+# asserts the negative space too.
+- name: Converge the Agent Network demo
+  hosts: agent-network
+  become: true
+  gather_facts: false
+  pre_tasks:
+    - ansible.builtin.wait_for_connection: {connect_timeout: 10, delay: 5, sleep: 5, timeout: 600}
+    - ansible.builtin.setup:
+  tasks:
+    - name: Install Docker and tooling
+      ansible.builtin.apt:
+        name: [docker.io, docker-compose-v2, ca-certificates, curl, jq, openssl, dnsutils]
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+    - ansible.builtin.systemd_service: {name: docker, enabled: true, state: started}
+
+    - ansible.builtin.file: {path: "{{ item.p }}", state: directory, mode: "{{ item.m }}"}
+      loop:
+        - {p: /opt/agent-network, m: "0755"}
+        - {p: /opt/agent-network/agent, m: "0755"}
+        - {p: /etc/agent-network, m: "0700"}
+        - {p: /etc/agent-network/secrets, m: "0700"}
+        - {p: /etc/agent-network/state, m: "0700"}
+        - {p: /run/agent-network, m: "0700"}
+
+    # /run is tmpfs: the setup key staged there never touches a disk and does
+    # not survive a reboot — which is fine, because an enrolled agent never
+    # needs it again. The tmpfiles entry recreates the directory each boot so
+    # the compose bind mount stays valid.
+    - name: Keep the tmpfs secret directory across reboots
+      ansible.builtin.copy:
+        dest: /etc/tmpfiles.d/agent-network.conf
+        mode: "0644"
+        content: |
+          d /run/agent-network 0700 root root -
+
+    # --- converge-time network validation -----------------------------------
+    #
+    # Build validated the subnets deterministically; only this host knows its
+    # own routes. A subnet already routed to something that is not one of this
+    # deployment's bridges would silently shadow the compose network and
+    # invalidate both the static addresses and the firewall rules derived
+    # from them.
+    - name: Refuse subnets the host already routes elsewhere
+      ansible.builtin.shell: |
+        set -euo pipefail
+        for subnet in 172.30.0.0/24 172.31.0.0/24; do
+          route=$(ip route show "$subnet" 2>/dev/null | head -1)
+          if [[ -n "$route" ]] && ! grep -qE 'dev br-' <<<"$route"; then
+            echo "subnet $subnet is already routed: $route" >&2
+            exit 1
+          fi
+        done
+      args: {executable: /bin/bash}
+      changed_when: false
+
+    # --- create-once secrets ------------------------------------------------
+    #
+    # Create-once is what keeps the deployment alive: a regenerated datastore
+    # encryption key orphans the peer database, a regenerated session cookie
+    # key logs the admin out, a regenerated relay secret breaks relayed peers
+    # while every container stays green. None of them is ever rendered into
+    # .colors/. The admin password is generated here rather than supplied:
+    # `agent-network-status` says where to read it.
+    - name: Generate the host's secrets once
+      ansible.builtin.shell: |
+        set -euo pipefail
+        umask 077
+        gen() { [[ -s "$1" ]] || printf '%s' "$2" > "$1"; chmod 0600 "$1"; }
+        gen /etc/agent-network/secrets/relay_auth_secret        "$(openssl rand -base64 32 | tr -d '=')"
+        gen /etc/agent-network/secrets/session_cookie_key       "$(openssl rand -base64 32)"
+        gen /etc/agent-network/secrets/datastore_encryption_key "$(openssl rand -base64 32)"
+        gen /etc/agent-network/secrets/admin_password           "$(openssl rand -base64 24)"
+      args: {executable: /bin/bash}
+      changed_when: false
+
+    # The Anthropic key is the deployment's one operator secret. It reaches
+    # the bootstrap step's environment and NetBird's encrypted store, and
+    # nothing else — not this play's logs (no_log), not a file, not argv.
+    - name: Refuse to converge with an empty Anthropic key
+      ansible.builtin.assert:
+        that:
+          - lookup('env','COLORS_PAR_ANTHROPIC_API_KEY') | length >= 8
+        fail_msg: >-
+          COLORS_PAR_ANTHROPIC_API_KEY is empty; the provider cannot be
+          connected without it
+      no_log: true
+
+    # --- configuration ------------------------------------------------------
+
+    - name: Stage configuration
+      ansible.builtin.copy:
+        src: "{{ item.src }}"
+        dest: "{{ item.dest }}"
+        mode: "{{ item.mode | default('0644') }}"
+      loop:
+        - {src: compose.yml, dest: /opt/agent-network/compose.yml}
+        - {src: dashboard.env, dest: /opt/agent-network/dashboard.env}
+        - {src: traefik-dynamic.yaml, dest: /opt/agent-network/traefik-dynamic.yaml}
+        - {src: desired.json, dest: /opt/agent-network/desired.json}
+        - {src: config.yaml, dest: /etc/agent-network/config.yaml.tmpl, mode: "0600"}
+        - {src: proxy.env, dest: /etc/agent-network/proxy.env.tmpl, mode: "0600"}
+        - {src: agent.Dockerfile, dest: /opt/agent-network/agent/Dockerfile}
+        - {src: agent-entry.sh, dest: /opt/agent-network/agent/agent-entry.sh, mode: "0755"}
+        - {src: bootstrap.sh, dest: /usr/local/sbin/agent-network-bootstrap, mode: "0755"}
+        - {src: smoke.sh, dest: /usr/local/sbin/agent-network-smoke, mode: "0755"}
+        - {src: status.sh, dest: /usr/local/sbin/agent-network-status, mode: "0755"}
+        - {src: firewall.sh, dest: /usr/local/sbin/agent-network-firewall, mode: "0755"}
+        - {src: firewall.service, dest: /etc/systemd/system/agent-network-firewall.service}
+      register: staged
+
+    - name: Reload systemd for the firewall unit
+      ansible.builtin.systemd_service: {daemon_reload: true}
+      changed_when: false
+
+    # The second isolation boundary, installed before any container exists so
+    # there is no window where the first boundary stands alone. PartOf=
+    # docker.service re-applies it on every Docker restart.
+    - name: Enable the DOCKER-USER isolation rules
+      ansible.builtin.systemd_service:
+        name: agent-network-firewall.service
+        enabled: true
+        state: started
+
+    # Substitution happens here rather than in the Selmer templates so the
+    # secrets never enter .colors/. Rendering to a temporary file and comparing
+    # is what keeps this idempotent: a plain copy-then-replace would rewrite
+    # the file on every converge and restart the server each time.
+    - name: Render the server configuration with its secrets
+      ansible.builtin.shell: |
+        set -euo pipefail
+        umask 077
+        s=/etc/agent-network/secrets
+        sed -e "s|__RELAY_AUTH_SECRET__|$(cat $s/relay_auth_secret)|" \
+            -e "s|__SESSION_COOKIE_ENCRYPTION_KEY__|$(cat $s/session_cookie_key)|" \
+            -e "s|__DATASTORE_ENCRYPTION_KEY__|$(cat $s/datastore_encryption_key)|" \
+            /etc/agent-network/config.yaml.tmpl > /tmp/.config.rendered
+        if ! cmp -s /tmp/.config.rendered /opt/agent-network/config.yaml; then
+          install -m 0600 /tmp/.config.rendered /opt/agent-network/config.yaml; echo CHANGED
+        fi
+        rm -f /tmp/.config.rendered
+      args: {executable: /bin/bash}
+      register: cfg
+      changed_when: "'CHANGED' in cfg.stdout"
+      notify: Recreate the NetBird server
+
+    # The agent's env file is rendered after bootstrap (the endpoint hostname
+    # does not exist before it); an empty placeholder keeps compose parsing
+    # happy meanwhile.
+    - name: Ensure the agent env file exists
+      ansible.builtin.copy:
+        dest: /opt/agent-network/agent.env
+        content: ""
+        force: false
+        mode: "0644"
+
+    # --- readiness ----------------------------------------------------------
+    #
+    # Traefik asks Let's Encrypt for a certificate the moment it starts, and
+    # TLS-ALPN-01 only succeeds once the names resolve to this host — the
+    # wildcard included, because the reverse proxy issues its own endpoint
+    # certificates the same way. Starting before that burns failure budget
+    # against a rate limit measured in weeks.
+    - name: Wait for public DNS to carry the name and its wildcard
+      ansible.builtin.shell: |
+        set -euo pipefail
+        for name in agent-network.example.com probe-any-label.agent-network.example.com; do
+          for resolver in 1.1.1.1 8.8.8.8; do
+            got=$(dig +short @$resolver A "$name" | tail -1)
+            [[ "$got" == "192.0.2.10" ]] || { echo "$name via $resolver = '${got:-none}'"; exit 1; }
+          done
+        done
+      args: {executable: /bin/bash}
+      register: dns_ready
+      changed_when: false
+      retries: 60
+      delay: 15
+      until: dns_ready.rc == 0
+
+    # Two-phase startup, exactly as the upstream installer does it: the proxy
+    # needs an access token that only a running netbird-server can mint.
+    - name: Converge the core containers
+      ansible.builtin.command: docker compose up -d --remove-orphans traefik dashboard netbird-server
+      args: {chdir: /opt/agent-network}
+      register: compose_core
+      changed_when: "'Created' in (compose_core.stdout + compose_core.stderr) or 'Recreated' in (compose_core.stdout + compose_core.stderr) or 'Started' in (compose_core.stdout + compose_core.stderr)"
+
+    # Readiness from the outside, because that is the only place it can be
+    # observed: the server image has no HTTP client to probe itself with. This
+    # one request proves Traefik is routing, ACME issued a real certificate,
+    # and the embedded IdP is serving discovery.
+    - name: Wait for the NetBird server to serve OIDC discovery
+      ansible.builtin.uri:
+        url: "https://agent-network.example.com/oauth2/.well-known/openid-configuration"
+        return_content: true
+      register: nb_health
+      retries: 60
+      delay: 10
+      until:
+        - nb_health is succeeded
+        - nb_health.json.issuer is defined
+
+    # The proxy access token, create-once and atomically persisted. A crash
+    # between create and persist leaves an orphan the next run closes: the
+    # delete-by-name is attempted first so at most one live token carries the
+    # name.
+    - name: Mint the proxy access token once
+      ansible.builtin.shell: |
+        set -euo pipefail
+        umask 077
+        f=/etc/agent-network/secrets/proxy_token
+        [[ -s $f ]] && exit 0
+        docker compose exec -T netbird-server \
+          /go/bin/netbird-server admin token delete --name colors-proxy \
+          --config /etc/netbird/config.yaml >/dev/null 2>&1 || true
+        token=$(docker compose exec -T netbird-server \
+          /go/bin/netbird-server admin token create --name colors-proxy \
+          --config /etc/netbird/config.yaml 2>/dev/null | grep "^Token:" | awk '{print $2}')
+        [[ -n $token ]] || { echo "no proxy token minted" >&2; exit 1; }
+        printf '%s' "$token" > "$f.tmp"; chmod 0600 "$f.tmp"; mv -f "$f.tmp" "$f"
+        echo CHANGED
+      args: {chdir: /opt/agent-network, executable: /bin/bash}
+      register: proxy_token
+      changed_when: "'CHANGED' in proxy_token.stdout"
+
+    - name: Render the proxy environment with its token
+      ansible.builtin.shell: |
+        set -euo pipefail
+        umask 077
+        sed -e "s|__PROXY_TOKEN__|$(cat /etc/agent-network/secrets/proxy_token)|" \
+            /etc/agent-network/proxy.env.tmpl > /tmp/.proxy.rendered
+        if ! cmp -s /tmp/.proxy.rendered /opt/agent-network/proxy.env; then
+          install -m 0600 /tmp/.proxy.rendered /opt/agent-network/proxy.env; echo CHANGED
+        fi
+        rm -f /tmp/.proxy.rendered
+      args: {executable: /bin/bash}
+      register: proxyenv
+      changed_when: "'CHANGED' in proxyenv.stdout"
+      notify: Recreate the proxy
+
+    - name: Converge the proxy
+      ansible.builtin.command: docker compose up -d proxy
+      args: {chdir: /opt/agent-network}
+      register: compose_proxy
+      changed_when: "'Created' in (compose_proxy.stdout + compose_proxy.stderr) or 'Started' in (compose_proxy.stdout + compose_proxy.stderr)"
+
+    - ansible.builtin.meta: flush_handlers
+
+    # The control plane: account, endpoint, provider, guardrail, group,
+    # policy, global limit, and — while no agent peer exists — the one-off
+    # setup key on tmpfs. Idempotent by reconciliation; the Anthropic key is
+    # environment-only and no_log hides the invocation.
+    - name: Bootstrap the control plane
+      ansible.builtin.command: /usr/local/sbin/agent-network-bootstrap
+      environment:
+        ANTHROPIC_API_KEY: "{{ lookup('env','COLORS_PAR_ANTHROPIC_API_KEY') }}"
+      register: bootstrap
+      changed_when: "'created' in bootstrap.stderr or 'connecting' in bootstrap.stderr or 'minting' in bootstrap.stderr"
+      no_log: true
+
+    - name: Read the endpoint the bootstrap recorded
+      ansible.builtin.slurp: {src: /etc/agent-network/state/endpoint}
+      register: endpoint_file
+
+    # Everything Claude Code needs, and no secret anywhere in it: the value
+    # of ANTHROPIC_API_KEY is a placeholder the proxy strips, and every model
+    # knob is pinned to the allowlisted model so no request can name one the
+    # guardrail rejects.
+    - name: Render the agent environment
+      ansible.builtin.copy:
+        dest: /opt/agent-network/agent.env
+        mode: "0644"
+        content: |
+          ANTHROPIC_BASE_URL=https://{{ endpoint_file.content | b64decode | trim }}
+          ANTHROPIC_API_KEY=none
+          ANTHROPIC_MODEL=claude-haiku-4-5-20251001
+          ANTHROPIC_SMALL_FAST_MODEL=claude-haiku-4-5-20251001
+          ANTHROPIC_DEFAULT_OPUS_MODEL=claude-haiku-4-5-20251001
+          ANTHROPIC_DEFAULT_SONNET_MODEL=claude-haiku-4-5-20251001
+          ANTHROPIC_DEFAULT_HAIKU_MODEL=claude-haiku-4-5-20251001
+          CLAUDE_CODE_SUBAGENT_MODEL=claude-haiku-4-5-20251001
+          DISABLE_TELEMETRY=1
+          DISABLE_ERROR_REPORTING=1
+          DISABLE_AUTOUPDATER=1
+          CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
+      register: agent_env
+
+    - name: Build and start the agent
+      ansible.builtin.command: docker compose --profile agent up -d --build agent
+      args: {chdir: /opt/agent-network}
+      register: compose_agent
+      changed_when: "'Created' in (compose_agent.stdout + compose_agent.stderr) or 'Recreated' in (compose_agent.stdout + compose_agent.stderr) or 'Started' in (compose_agent.stdout + compose_agent.stderr)"
+
+    - name: Recreate the agent when its environment changed
+      ansible.builtin.command: docker compose --profile agent up -d --force-recreate agent
+      args: {chdir: /opt/agent-network}
+      when: agent_env is changed
+
+    # Enrollment verified, then the credential that made it possible is
+    # closed: key revoked, tmpfs copy removed, and the container's own
+    # configuration asserted free of it.
+    - name: Verify enrollment and close the setup key
+      ansible.builtin.command: /usr/local/sbin/agent-network-bootstrap --post-enroll
+      register: post_enroll
+      changed_when: "'closed' in post_enroll.stderr"
+      retries: 30
+      delay: 10
+      until: post_enroll.rc == 0
+
+    - name: Prove the demo demonstrates what it claims
+      ansible.builtin.command: /usr/local/sbin/agent-network-smoke
+      register: smoke
+      changed_when: false
+      retries: 2
+      delay: 20
+      until: smoke.rc == 0
+
+    # --- resilience, proven once --------------------------------------------
+    #
+    # A Docker restart rebuilds DOCKER-USER; the unit's PartOf= must put the
+    # rules back without anyone noticing. Asserted by restarting Docker for
+    # real and re-running the isolation gate — once, because the proof does
+    # not decay and a live stack should not be bounced on every converge.
+    - name: Prove isolation survives a Docker restart
+      ansible.builtin.shell: |
+        set -euo pipefail
+        systemctl restart docker
+        sleep 5
+        cd /opt/agent-network
+        docker compose --profile agent up -d
+        for i in $(seq 1 30); do
+          iptables -C DOCKER-USER -s 172.31.0.0/24 -j DROP 2>/dev/null && break
+          sleep 2
+        done
+        iptables -C DOCKER-USER -s 172.31.0.0/24 -j DROP
+        sleep 10
+        /usr/local/sbin/agent-network-smoke --isolation-only
+        touch /etc/agent-network/state/docker-restart-tested
+      args: {executable: /bin/bash, creates: /etc/agent-network/state/docker-restart-tested}
+
+    - name: Check whether the reboot resilience proof has run
+      ansible.builtin.stat: {path: /etc/agent-network/state/reboot-tested}
+      register: reboot_done
+
+    - name: Prove isolation survives a reboot
+      when: not reboot_done.stat.exists
+      block:
+        - ansible.builtin.reboot: {reboot_timeout: 600}
+        - ansible.builtin.command: docker compose --profile agent up -d
+          args: {chdir: /opt/agent-network}
+          changed_when: false
+        - ansible.builtin.command: /usr/local/sbin/agent-network-smoke --isolation-only
+          register: reboot_smoke
+          changed_when: false
+          retries: 12
+          delay: 10
+          until: reboot_smoke.rc == 0
+        - ansible.builtin.file:
+            path: /etc/agent-network/state/reboot-tested
+            state: touch
+            mode: "0600"
+
+  handlers:
+    - name: Recreate the NetBird server
+      ansible.builtin.command: docker compose up -d --force-recreate netbird-server
+      args: {chdir: /opt/agent-network}
+    - name: Recreate the proxy
+      ansible.builtin.command: docker compose up -d --force-recreate proxy
+      args: {chdir: /opt/agent-network}

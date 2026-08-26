@@ -1,0 +1,148 @@
+# Example desired state for an agent-network deployment. Non-secret values only.
+# Credentials belong in the gitignored .envrc.private as COLORS_PAR_* variables.
+# Never export COLORS_PAR_PROFILE: it selects this deployment's remote state.
+#
+# Required credentials:
+#   Vultr           COLORS_PAR_VULTR_API_KEY
+#   Cloudflare      COLORS_PAR_CLOUDFLARE_API_TOKEN
+#                   (edit rights on the zone; DNS only —
+#                   TLS is TLS-ALPN-01 end to end and needs no DNS-01 scope)
+#   state in R2     COLORS_PAR_R2_ACCESS_KEY_ID
+#                   COLORS_PAR_R2_SECRET_ACCESS_KEY
+#   Anthropic       COLORS_PAR_ANTHROPIC_API_KEY
+#                   (held server-side in NetBird's encrypted store after
+#                   convergence; never written to any file on the host)
+#
+# Everything else is generated on the server and supplied by nobody: the relay
+# auth secret, the datastore encryption key, the session cookie key, the proxy
+# access token, the local admin password, the durable automation token, and the
+# agent's one-off setup key. This deployment is deliberately disposable — there
+# is no backup subsystem; recovery is a guarded delete followed by create,
+# which regenerates the endpoint hostname and every peer identity.
+
+profile: agent-network-example
+workdir: .colors
+
+provider-compute: vultr
+provider-dns: cloudflare
+provider-backend: r2
+
+# Preserve this guard in committed desired state. Destruction requires an
+# explicitly authorized one-run override; never edit this flag to bypass it.
+compute-prevent-destroy: true
+
+# --- Agent Network -----------------------------------------------------------
+
+# One host carries the whole demo: the combined netbird-server (management,
+# signal, relay, embedded IdP, STUN), the dashboard in agent-network-only
+# mode, the NetBird reverse proxy in private mode, and Traefik on 443 — plus
+# the isolated agent container. The wildcard record beneath this host exists
+# for the generated agent-network endpoint (for example
+# <label>.agent-network.example.com), which management serves to
+# authorized peers only, over the WireGuard overlay.
+agent-network-host: agent-network.example.com
+
+agent-network-letsencrypt-email: admin@example.com
+
+# Owner of the local admin account, minted headlessly by POST /api/setup at
+# first convergence. Its password is generated on the host, create-once, and
+# surfaced by `agent-network-status` over SSH — it is deliberately not an
+# operator-supplied credential.
+agent-network-admin-email: admin@example.com
+agent-network-admin-name: Operator
+
+# Models the Anthropic provider claims, with the pricing used for cost
+# accounting. Two models are claimed so both denial classes are demonstrable
+# at zero upstream cost: the guardrail allowlist below keeps only Haiku, so a
+# request for the claimed Sonnet is denied by policy ("model not allowed"),
+# while an unclaimed model is denied by routing ("model not available").
+# Prices are USD per 1k tokens, Anthropic-shape cache buckets.
+agent-network-provider-models:
+  - id: claude-haiku-4-5-20251001
+    input-per-1k: 0.001
+    output-per-1k: 0.005
+    cache-read-per-1k: 0.0001
+    cache-creation-per-1k: 0.00125
+  - id: claude-sonnet-4-5-20250929
+    input-per-1k: 0.003
+    output-per-1k: 0.015
+    cache-read-per-1k: 0.0003
+    cache-creation-per-1k: 0.00375
+
+# The guardrail model allowlist: every Claude Code model knob in the agent
+# container is pinned to the first entry.
+agent-network-allowed-models:
+  - claude-haiku-4-5-20251001
+
+# Cost ceilings, both desired state and both read back at acceptance. The
+# policy caps are per-group on the agents peer group (the caller is an
+# autonomous peer, not an IdP user); the global budget rule is the
+# account-wide backstop across every policy and provider. Windows are fixed
+# epoch-aligned buckets of one day.
+agent-network-policy-budget-usd-per-day: 2
+agent-network-policy-tokens-per-day: 2000000
+agent-network-global-budget-usd-per-day: 5
+agent-network-global-tokens-per-day: 5000000
+
+# Access-log collection with the shortest supported retention; usage and cost
+# metering is always on regardless. Prompt capture stays off.
+agent-network-log-retention-days: 7
+
+agent-network-stun-port: 3478
+agent-network-log-level: info
+
+# Two Docker networks. The gateway subnet carries the four stack containers
+# and has egress. The agent subnet is internal (no internet route) and carries
+# exactly three members: traefik (bootstrap HTTPS/gRPC), the reverse proxy
+# (the WireGuard leg), and the agent. Static addresses are derived from these
+# subnets; a DOCKER-USER firewall ruleset (allow those two members, then deny)
+# is the second, independent isolation boundary. Build validates the subnets
+# deterministically; converge re-validates against the host's routes.
+agent-network-gateway-subnet: 172.30.0.0/24
+agent-network-agent-subnet: 172.31.0.0/24
+
+# Container images, pinned by tag AND digest: this package owns its templates
+# rather than running the upstream installer, so nothing tells it when a
+# floating tag moves underneath it, and a silent retag upstream must surface
+# as a digest mismatch rather than a behaviour change. Move the NetBird
+# server, proxy, and client version together — one release train.
+agent-network-server-image: netbirdio/netbird-server:0.77.1@sha256:e71f39cefcd90956d818dc4179084fd47d39f0741d1211b818ec640766b5794d
+agent-network-dashboard-image: netbirdio/dashboard:v2.91.1@sha256:f3eb26c93ca9901a7385e88e12f6ad98d04e075e8817c664d73557fea123875f
+agent-network-proxy-image: netbirdio/reverse-proxy:0.77.1@sha256:d3f5815133542c333e7e7166e19989adcce9afb15443a8de5ecbc87ef528c8f0
+agent-network-traefik-image: traefik:v3.7.11@sha256:5203c3f39ca70de6790d964624e042463ffbd57715bc82be155cf224c0dd5144
+
+# The agent image is built on the host from these pins: the Node base by
+# digest, Claude Code and the NetBird client by exact version. Acceptance
+# prints the installed versions.
+agent-network-agent-base-image: node:22-slim@sha256:83f487e0a63425e5b4d146fb5e5be574bcbe1b7b843d3ebafdd95eaf7767a7e5
+agent-network-claude-code-version: 2.1.246
+agent-network-netbird-client-version: 0.77.1
+
+# --- Vultr -------------------------------------------------------------------
+
+# No vultr-name: per workspace standards/compute-name.md the machine and its
+# firewall are named after the profile. This package is born conforming, so
+# there is no name key to keep in step with the profile.
+vultr-region: ams
+vultr-plan: vc2-2c-4gb
+vultr-os-id: 2284
+
+# No vultr-ssh-keys: keygen mode per workspace standards/ssh-keypair.md. The
+# package generates and owns ~/.ssh/agent-network-vultr and registers the
+# account key resource named after the profile. Setting vultr-ssh-keys here
+# would switch to opt-out mode, where the package touches no key material.
+
+vultr-ssh-sources:
+  - 0.0.0.0/0
+vultr-http-sources:
+  - 0.0.0.0/0
+# STUN, the only UDP published. The combined server bundles it; the WireGuard
+# leg between the agent and the proxy never leaves the host's agent subnet,
+# so no WireGuard port is published.
+vultr-stun-sources:
+  - 0.0.0.0/0
+
+# --- R2 state backend ---------------------------------------------------------
+
+r2-bucket: tofu-state-example
+r2-endpoint: https://example.eu.r2.cloudflarestorage.com

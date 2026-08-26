@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="description" content="Provision a minimal NetBird Agent Network demo — keyless, identity-gated LLM access with a network-isolated agent running headless Claude Code — on one Vultr instance.">
+  <title>Agent Network Package Skill — getcolors</title>
+  <style>
+    :root{color-scheme:light;--ink:#1f2328;--muted:#59636e;--line:#d0d7de;--soft:#f6f8fa;--blue:#0969da;--green:#1a7f37;--warn:#9a6700}*{box-sizing:border-box}body{margin:0;color:var(--ink);font:16px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}main{max-width:920px;margin:auto;padding:64px 28px 100px}h1{font-size:52px;line-height:1.05;margin:0}h2{margin-top:54px;padding-bottom:8px;border-bottom:1px solid var(--line)}h3{margin-top:30px}.lead{font-size:20px;color:var(--muted);max-width:790px}code,pre{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}pre{padding:18px;overflow:auto;border:1px solid var(--line);border-radius:8px;background:var(--soft)}:not(pre)>code{padding:.12em .35em;border-radius:5px;background:var(--soft)}a{color:var(--blue)}.eyebrow{color:var(--green);font-weight:700;letter-spacing:.08em}.callout{padding:16px 18px;border-left:4px solid var(--green);background:#dafbe1}.warning{border-color:var(--warn);background:#fff8c5}.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}.card{padding:18px;border:1px solid var(--line);border-radius:8px}.card h3{margin-top:0}table{width:100%;border-collapse:collapse;margin-top:16px}th,td{padding:8px 10px;border:1px solid var(--line);text-align:left;vertical-align:top}th{background:var(--soft)}@media(max-width:650px){main{padding-top:38px}.grid{grid-template-columns:1fr}h1{font-size:40px}}
+  </style>
+  <script async src="https://www.googletagmanager.com/gtag/js?id=G-4VKP1WY4QJ"></script>
+  <script>window.dataLayer=window.dataLayer||[];function gtag(){dataLayer.push(arguments)}gtag('js',new Date());gtag('config','G-4VKP1WY4QJ',{page_title:'Agent Network Package Skill — getcolors'});</script>
+<script src="https://rybbit.getcolors.ai/api/script.js" data-site-id="9fb9c41a6d49" defer></script>
+</head>
+<body><main>
+  <p class="eyebrow">GREEN PACKAGE SKILL · VULTR · NETBIRD AGENT NETWORK · CLAUDE CODE</p>
+  <h1>Agent Network Package Skill</h1>
+  <p class="lead">A reproducible Green workflow for a minimal <a href="https://docs.netbird.io/agent-network">NetBird Agent Network</a> demo: a keyless, policy-gated LLM endpoint on one guarded Vultr instance — and an isolated agent container that can reach nothing else.</p>
+
+  <div class="callout"><strong>The isolation is the demo.</strong> The agent container sits on an internal Docker network with no internet route, doubled by DOCKER-USER firewall rules. Its only path to an LLM is the agent-network endpoint over its WireGuard tunnel, where the request carries the peer's identity, passes the policy, hits the model allowlist and the budget caps, and lands in the access log — with the Anthropic key held server-side, never in the container.</div>
+
+  <h2>Quick start</h2>
+  <pre><code>npx skills add getcolors/agent-network
+cp .agents/skills/package-agent-network-green/green ./green
+chmod +x green
+./green build
+./green create --dry-run</code></pre>
+  <p>Build renders reproducible output and dry-run walks the workflow without provider side effects. Real creation and deletion require explicit authorization.</p>
+
+  <h2>Architecture</h2>
+  <div class="grid">
+    <div class="card"><h3>Compute</h3><p>One Vultr instance and a firewall opening 22, 80, 443 and STUN. In keygen mode the account SSH key resource is named after the profile and lives in this deployment's state.</p></div>
+    <div class="card"><h3>DNS</h3><p>Two <strong>unproxied</strong> Cloudflare <code>A</code> records: the base name and its wildcard. The wildcard is contract — the endpoint hostname is a label management mints at bootstrap, and nothing knows it earlier. TLS is TLS-ALPN-01 end to end: Traefik for the base name, the reverse proxy's own ACME for endpoint hostnames behind an SNI passthrough.</p></div>
+    <div class="card"><h3>Control plane</h3><p>Bootstrapped headlessly and reconciled by name: admin account, endpoint, the Anthropic provider (two claimed models, one allowlisted), a policy with per-group caps on the agents peer group, and an account-wide global ceiling.</p></div>
+    <div class="card"><h3>Acceptance</h3><p>Raw-TCP isolation probes with a success control; the tunnel up; the keyless call; both denial classes at zero upstream cost; headless Claude Code on the same path; access-log attribution; limits read back; an external probe proving the endpoint is tunnel-only; isolation re-asserted after a Docker restart and a reboot.</p></div>
+  </div>
+
+  <h2>Fake-key mode</h2>
+  <p>A deliberately fake <code>COLORS_PAR_ANTHROPIC_API_KEY</code> is a supported mode: acceptance then expects Anthropic's own <code>401</code> relayed through the proxy — proving isolation, tunnel DNS, policy authorization and server-side key injection with nothing billable. Swap in a real key and re-run <code>create</code> for real completions.</p>
+
+  <h2>The machine keypair</h2>
+  <p>The deployment owns its SSH key, following the workspace SSH Keypair Standard. Leave <code>vultr-ssh-keys</code> out of <code>colors.yml</code> and the first real <code>create</code> generates <code>~/.ssh/&lt;profile&gt;</code>, registers it at Vultr under the profile name, and a successful <code>delete</code> removes it last — never before. Supplying <code>vultr-ssh-keys</code> opts out entirely. Convergence also writes one <code>~/.ssh/config</code> block per the SSH Config Standard, so <code>ssh &lt;profile&gt;</code> just works.</p>
+
+  <h2>Exposure</h2>
+  <table>
+    <tr><th>Port</th><th>Exposure</th><th>Purpose</th></tr>
+    <tr><td>22</td><td><code>vultr-ssh-sources</code></td><td>Key-only SSH for convergence and recovery</td></tr>
+    <tr><td>80 / 443</td><td><code>vultr-http-sources</code></td><td>Traefik: dashboard, REST API, gRPC, relay WebSocket, embedded IdP — and the SNI passthrough that hands endpoint TLS to the private reverse proxy</td></tr>
+    <tr><td>3478 / udp</td><td><code>vultr-stun-sources</code></td><td>STUN, bundled into <code>netbird-server</code>. The only UDP published — no WireGuard port, because the only peer lives on the internal Docker network.</td></tr>
+    <tr><td>9000 / 9090 / 8443</td><td>closed</td><td>Healthcheck, metrics, and the proxy's direct port — asserted refused from outside</td></tr>
+  </table>
+
+  <div class="callout warning"><strong>Disposable by design.</strong> No backups: recovery is a guarded <code>delete</code> followed by <code>create</code>, which regenerates the endpoint hostname and every peer identity. Nothing on the box is worth outliving it.</div>
+
+  <h2>Safety</h2>
+  <ul>
+    <li>Credentials are <code>COLORS_PAR_*</code> variables in the gitignored <code>.envrc.private</code> — never in <code>colors.yml</code>.</li>
+    <li>Never export <code>COLORS_PAR_PROFILE</code>; the profile keys remote state.</li>
+    <li><code>.colors/</code> is generated output: never edit or commit it.</li>
+    <li><code>compute-prevent-destroy: true</code> guards deletion behind a one-run override.</li>
+    <li>The agent's one-off setup key travels by file on tmpfs, is revoked after enrollment, and never appears in argv or compose configuration.</li>
+  </ul>
+
+  <p><a href="https://github.com/getcolors/agent-network">Source on GitHub</a> · <a href="skills/package-agent-network-green/references/configuration.md">Configuration reference</a></p>
+</main></body>
+</html>
