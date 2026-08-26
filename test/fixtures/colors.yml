@@ -92,6 +92,10 @@ agent-network-agent-base-image: node:22-slim@sha256:83f487e0a63425e5b4d146fb5e5b
 agent-network-claude-code-version: 2.1.246
 agent-network-netbird-client-version: 0.77.1
 
+# The DNS-01 client that issues the wildcard certificate at converge time;
+# exact version, checksum-verified from its GitHub release.
+agent-network-lego-version: 5.4.0
+
 # --- Vultr -------------------------------------------------------------------
 
 # No vultr-name: the Compute Name Standard names the machine and its firewall

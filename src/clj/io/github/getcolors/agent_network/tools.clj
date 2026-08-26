@@ -149,7 +149,9 @@
     :admin_email (:agent-network-admin-email opts)
     :admin_name (:agent-network-admin-name opts)
     :provider
-    {:provider_id "anthropic"
+    ;; The catalog id, from GET /api/agent-network/catalog/providers on the
+    ;; pinned release — "anthropic" alone is a 422.
+    {:provider_id "anthropic_api"
      :name "Anthropic"
      :upstream_url "https://api.anthropic.com"
      :models (for [m (validate/provider-models opts)]

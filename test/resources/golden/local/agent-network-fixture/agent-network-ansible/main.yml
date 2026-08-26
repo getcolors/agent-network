@@ -100,6 +100,80 @@
           connected without it
       no_log: true
 
+    # --- the wildcard certificate -------------------------------------------
+    #
+    # Endpoint TLS comes from a wildcard pair issued here via DNS-01, because
+    # the pinned reverse-proxy build's per-name ACME responder is defective
+    # (see proxy.env). The Cloudflare token already required for the DNS stage
+    # covers the TXT records — same record-edit scope, no new credential — and
+    # it reaches lego's environment only for the duration of the task.
+    # Renewal is a re-converge: `create` renews when fewer than 30 days
+    # remain, which suits a deployment whose recovery story is delete+create.
+
+    - name: Install lego once, verified against its release checksums
+      ansible.builtin.shell: |
+        set -euo pipefail
+        v="5.4.0"
+        [[ -x /usr/local/bin/lego ]] && /usr/local/bin/lego --version | grep -q " $v " && exit 0
+        curl -fsSL -o /tmp/lego.tgz \
+          "https://github.com/go-acme/lego/releases/download/v${v}/lego_v${v}_linux_amd64.tar.gz"
+        curl -fsSL "https://github.com/go-acme/lego/releases/download/v${v}/lego_${v}_checksums.txt" \
+          | grep "lego_v${v}_linux_amd64.tar.gz" | sed 's#  .*#  /tmp/lego.tgz#' | sha256sum -c -
+        tar -xzf /tmp/lego.tgz -C /usr/local/bin lego
+        chmod 0755 /usr/local/bin/lego
+        rm -f /tmp/lego.tgz
+        echo CHANGED
+      args: {executable: /bin/bash}
+      register: lego_install
+      changed_when: "'CHANGED' in lego_install.stdout"
+
+    - name: Issue or renew the wildcard certificate
+      ansible.builtin.shell: |
+        set -euo pipefail
+        umask 077
+        export LEGO_PATH=/etc/agent-network/lego
+        crt="$LEGO_PATH/certificates/_.agent-network.example.com.crt"
+        common=(--dns cloudflare --dns.resolvers 1.1.1.1:53 --dns.propagation.disable-rns)
+        if [[ ! -s $crt ]]; then
+          /usr/local/bin/lego run -a -m "admin@example.com" \
+            -d "*.agent-network.example.com" "${common[@]}" >&2
+          echo CHANGED
+        elif ! openssl x509 -noout -checkend 2592000 -in "$crt" >/dev/null 2>&1; then
+          /usr/local/bin/lego renew -m "admin@example.com" \
+            -d "*.agent-network.example.com" "${common[@]}" >&2
+          echo CHANGED
+        fi
+      args: {executable: /bin/bash}
+      environment:
+        CLOUDFLARE_DNS_API_TOKEN: "{{ lookup('env','COLORS_PAR_CLOUDFLARE_API_TOKEN') }}"
+      register: lego_issue
+      changed_when: "'CHANGED' in lego_issue.stdout"
+      no_log: true
+
+    # Owned by the proxy image's fixed netbird user (uid 1000), because a bind
+    # mount carries numeric ownership and the container must read the key.
+    - name: Install the wildcard pair where the proxy reads it
+      ansible.builtin.shell: |
+        set -euo pipefail
+        umask 077
+        mkdir -p /etc/agent-network/wildcard
+        src=/etc/agent-network/lego/certificates
+        changed=0
+        for pair in "crt:wildcard.crt" "key:wildcard.key"; do
+          ext=${pair%%:*}; dest=${pair#*:}
+          if ! cmp -s "$src/_.agent-network.example.com.$ext" "/etc/agent-network/wildcard/$dest"; then
+            install -m 0600 "$src/_.agent-network.example.com.$ext" "/etc/agent-network/wildcard/$dest"
+            changed=1
+          fi
+        done
+        chown -R 1000:1000 /etc/agent-network/wildcard
+        chmod 0700 /etc/agent-network/wildcard
+        [[ $changed == 1 ]] && echo CHANGED || true
+      args: {executable: /bin/bash}
+      register: wildcard_install
+      changed_when: "'CHANGED' in wildcard_install.stdout"
+      notify: Recreate the proxy
+
     # --- configuration ------------------------------------------------------
 
     - name: Stage configuration
@@ -159,14 +233,18 @@
       notify: Recreate the NetBird server
 
     # The agent's env file is rendered after bootstrap (the endpoint hostname
-    # does not exist before it); an empty placeholder keeps compose parsing
-    # happy meanwhile.
-    - name: Ensure the agent env file exists
+    # does not exist before it), and the proxy's after its token is minted —
+    # but `docker compose` refuses to parse a compose file whose env_file is
+    # missing, even to exec into an unrelated service. Placeholders break the
+    # cycle, exactly as the upstream installer's `NB_PROXY_TOKEN=placeholder`
+    # does; the render tasks below replace them.
+    - name: Ensure the deferred env files exist
       ansible.builtin.copy:
-        dest: /opt/agent-network/agent.env
+        dest: "/opt/agent-network/{{ item }}"
         content: ""
         force: false
         mode: "0644"
+      loop: [agent.env, proxy.env]
 
     # --- readiness ----------------------------------------------------------
     #
@@ -215,21 +293,23 @@
         - nb_health.json.issuer is defined
 
     # The proxy access token, create-once and atomically persisted. A crash
-    # between create and persist leaves an orphan the next run closes: the
-    # delete-by-name is attempted first so at most one live token carries the
-    # name.
+    # between create and persist leaves an orphan the next run closes:
+    # `admin token list` is reconciled first, revoking any live token that
+    # carries the name, so at most one usable colors-proxy token exists.
     - name: Mint the proxy access token once
       ansible.builtin.shell: |
         set -euo pipefail
         umask 077
         f=/etc/agent-network/secrets/proxy_token
         [[ -s $f ]] && exit 0
-        docker compose exec -T netbird-server \
-          /go/bin/netbird-server admin token delete --name colors-proxy \
-          --config /etc/netbird/config.yaml >/dev/null 2>&1 || true
-        token=$(docker compose exec -T netbird-server \
-          /go/bin/netbird-server admin token create --name colors-proxy \
-          --config /etc/netbird/config.yaml 2>/dev/null | grep "^Token:" | awk '{print $2}')
+        admin() { docker compose exec -T netbird-server \
+          /go/bin/netbird-server admin "$@" --config /etc/netbird/config.yaml; }
+        for id in $(admin token list 2>/dev/null \
+                    | awk '$2=="colors-proxy" && $NF=="no" {print $1}'); do
+          admin token revoke "$id" >/dev/null 2>&1 || true
+        done
+        token=$(admin token create --name colors-proxy 2>/dev/null \
+                | grep "^Token:" | awk '{print $2}')
         [[ -n $token ]] || { echo "no proxy token minted" >&2; exit 1; }
         printf '%s' "$token" > "$f.tmp"; chmod 0600 "$f.tmp"; mv -f "$f.tmp" "$f"
         echo CHANGED

@@ -3,7 +3,7 @@
   "admin_email" : "admin@example.com",
   "admin_name" : "Operator",
   "provider" : {
-    "provider_id" : "anthropic",
+    "provider_id" : "anthropic_api",
     "name" : "Anthropic",
     "upstream_url" : "https://api.anthropic.com",
     "models" : [ {

@@ -85,7 +85,7 @@
   ;; The host bootstrap reconciles against this document; its shape is the
   ;; wire shape of the agent-network API (underscore keys, per-1k prices).
   (let [desired (json/parse-string (tools/desired-json (fixture)) true)]
-    (is (= "anthropic" (get-in desired [:provider :provider_id])))
+    (is (= "anthropic_api" (get-in desired [:provider :provider_id])))
     (is (= "https://api.anthropic.com" (get-in desired [:provider :upstream_url])))
     (is (= ["claude-haiku-4-5-20251001"] (:allowed_models desired)))
     (is (= 2 (count (get-in desired [:provider :models]))))
@@ -106,15 +106,18 @@
   (doseq [event [:build :delete]]
     (is (= 0 (:green/exit (tools/acceptance-step (assoc (fixture) :green/event event)))))))
 
-(deftest the-agent-maps-only-the-bootstrap-name
-  ;; The base domain must resolve to Traefik on the internal network (the
-  ;; bootstrap precedes tunnel DNS), and nothing else may be mapped: the
-  ;; endpoint hostname's resolution is management's, pushed over the tunnel,
-  ;; because that is what keeps the metered path on the tunnel and the
-  ;; identity real.
+(deftest hairpin-is-broken-by-exactly-two-mappings
+  ;; Two containers must reach the public hostname without leaving the box:
+  ;; the agent's bootstrap terminates at Traefik on the internal network
+  ;; (tunnel DNS does not exist yet), and the proxy's embedded client reaches
+  ;; signal/relay at Traefik on the gateway network (hairpin NAT otherwise).
+  ;; Nothing else is mapped — in particular not the endpoint hostname, whose
+  ;; resolution is management's, pushed over the tunnel, because that is what
+  ;; keeps the metered path on the tunnel and the identity real.
   (let [compose (slurp (io/resource "io/github/getcolors/agent-network/tools/ansible/compose.yml"))]
     (is (str/includes? compose "<{ agent-network-host }>:<{ traefik-agent-ip }>"))
-    (is (= 1 (count (re-seq #"(?m)^\s+extra_hosts:" compose))))))
+    (is (str/includes? compose "<{ agent-network-host }>:<{ traefik-ip }>"))
+    (is (= 2 (count (re-seq #"(?m)^\s+extra_hosts:" compose))))))
 
 (deftest the-agent-joins-only-the-internal-network
   (let [compose (slurp (io/resource "io/github/getcolors/agent-network/tools/ansible/compose.yml"))

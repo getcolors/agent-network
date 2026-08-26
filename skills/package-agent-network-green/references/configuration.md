@@ -25,7 +25,7 @@ is set.
 | Key | Meaning |
 |---|---|
 | `agent-network-host` | Public hostname for the whole demo: dashboard, REST API, management/signal gRPC, relay WebSocket, embedded IdP, and the base the generated agent-network endpoint hangs one label beneath. The DNS stage creates it **and** `*.<host>` — the wildcard is contract, because the endpoint label is minted at bootstrap and nothing knows it earlier. |
-| `agent-network-letsencrypt-email` | Contact address for ACME (Traefik's TLS-ALPN-01 for the base name, and the reverse proxy's own endpoint certificates). |
+| `agent-network-letsencrypt-email` | Contact address for ACME: Traefik's TLS-ALPN-01 for the base name, and lego's DNS-01 for the wildcard endpoint certificate. |
 | `agent-network-admin-email` | Owner of the local admin account, minted headlessly by `POST /api/setup`. Its password is generated on the host, create-once: `/etc/agent-network/secrets/admin_password`. |
 | `agent-network-admin-name` | Display name for that account. |
 | `agent-network-provider-models` | The models the Anthropic provider claims, each with `id` and per-1k prices (`input-per-1k`, `output-per-1k`, optional `cache-read-per-1k`, `cache-creation-per-1k`). Must claim at least one model outside the allowlist so the guardrail denial is demonstrable. |
@@ -53,9 +53,11 @@ a floating tag moves; pin tag@digest and bump deliberately.
 `agent-network-agent-base-image`.
 
 `agent-network-claude-code-version` and `agent-network-netbird-client-version`
-are exact `x.y.z` versions for the payloads built into the agent image; the
-NetBird client tarball is verified against its release checksums. Move the
-server image, proxy image and client version together — one release train.
+are exact `x.y.z` versions for the payloads built into the agent image;
+`agent-network-lego-version` pins the DNS-01 client that issues the wildcard
+certificate at converge time. Both downloads are verified against their
+release checksums. Move the server image, proxy image and client version
+together — one release train.
 
 ## Vultr
 
@@ -77,7 +79,7 @@ server image, proxy image and client version together — one release train.
 | Variable | Purpose |
 |---|---|
 | `COLORS_PAR_VULTR_API_KEY` | Compute. |
-| `COLORS_PAR_CLOUDFLARE_API_TOKEN` | DNS records only; TLS is TLS-ALPN-01 end to end and needs no DNS scope beyond record edits. |
+| `COLORS_PAR_CLOUDFLARE_API_TOKEN` | Record edits only: the A records, and the DNS-01 TXT records lego uses to issue the wildcard certificate at converge time. |
 | `COLORS_PAR_R2_ACCESS_KEY_ID`, `COLORS_PAR_R2_SECRET_ACCESS_KEY` | State backend. |
 | `COLORS_PAR_ANTHROPIC_API_KEY` | Handed to NetBird's encrypted store at converge; the agent never sees it. A deliberately fake value is a supported demo mode (acceptance then expects the relayed upstream 401). |
 

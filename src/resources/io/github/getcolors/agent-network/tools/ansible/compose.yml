@@ -156,11 +156,29 @@ services:
       - ./proxy.env
     volumes:
       - agent_network_proxy_certs:/certs
+      # The wildcard certificate pair issued at converge time (DNS-01, lego);
+      # file-watched by the proxy, so a renewal is picked up in place.
+      - /etc/agent-network/wildcard:/wildcard:ro
+    # The embedded netbird client derives the signal and relay addresses from
+    # the management configuration, which names the **public** hostname — and
+    # a container resolving that name gets this host's own public address, so
+    # the connection dies in hairpin NAT while management (reached directly at
+    # http://netbird-server:80) keeps working. Pointing the name at Traefik on
+    # the shared network keeps the URL, the certificate and the gRPC routing
+    # identical while the packet never leaves the box. The sibling `netbird`
+    # package learned this with Authentik's issuer; same lesson, one layer
+    # deeper.
+    extra_hosts:
+      - "<{ agent-network-host }>:<{ traefik-ip }>"
     labels:
       # TCP passthrough for any unmatched domain (the proxy handles its own
       # TLS for generated endpoint hostnames, over PROXY protocol v2 so client
       # addresses survive the hop).
       - traefik.enable=true
+      # Traefik shares two networks with this container and picks one
+      # arbitrarily unless told; the proxy trusts PROXY protocol headers from
+      # exactly Traefik's gateway address, so the choice must not float.
+      - traefik.docker.network=agent-network-gateway
       - traefik.tcp.routers.proxy-passthrough.entrypoints=websecure
       - traefik.tcp.routers.proxy-passthrough.rule=HostSNI(`*`)
       - traefik.tcp.routers.proxy-passthrough.tls.passthrough=true
@@ -216,11 +234,16 @@ volumes:
 networks:
   gateway:
     driver: bridge
+    # Explicit, because the traefik.docker.network label above must name it
+    # exactly and Compose's default (directory-derived) project prefix is not
+    # a contract.
+    name: agent-network-gateway
     ipam:
       config:
         - subnet: <{ agent-network-gateway-subnet }>
   agent:
     driver: bridge
+    name: agent-network-agent
     # No internet route exists on this network. This is the first isolation
     # boundary; the DOCKER-USER rules the playbook installs are the second,
     # independent one.

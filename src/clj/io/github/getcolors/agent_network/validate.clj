@@ -31,6 +31,7 @@
    :agent-network-proxy-image :agent-network-traefik-image
    :agent-network-agent-base-image
    :agent-network-claude-code-version :agent-network-netbird-client-version
+   :agent-network-lego-version
    :vultr-region :vultr-plan :vultr-os-id
    :vultr-ssh-sources :vultr-http-sources :vultr-stun-sources
    :r2-bucket :r2-endpoint])
@@ -206,7 +207,8 @@
           :when (or (str/ends-with? v ":latest") (str/ends-with? v ":main")
                     (str/includes? v ":latest@") (str/includes? v ":main@"))]
       (str k " must not track a floating tag; pin the version"))
-    (for [k [:agent-network-claude-code-version :agent-network-netbird-client-version]
+    (for [k [:agent-network-claude-code-version :agent-network-netbird-client-version
+             :agent-network-lego-version]
           :let [v (get opts k)]
           :when (and (not (missing? v)) (not (re-matches version-re (str v))))]
       (str k " must be an exact x.y.z version"))

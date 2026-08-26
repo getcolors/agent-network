@@ -135,7 +135,7 @@ log "gate 3 passed ($mode-key mode)"
 
 log "gate 3b: guardrail denial for $DENIED"
 probe "$DENIED"
-if [[ $code != 403 ]] || ! grep -qiE 'not[ _-]?allowed' <<<"$body"; then
+if [[ $code != 403 ]] || ! grep -qiE 'model_blocked|allowlist|not[ _-]?allowed' <<<"$body"; then
   log "FAIL: expected 403 model-not-allowed, got HTTP $code: $(head -c 300 <<<"$body")"
   exit 1
 fi
@@ -143,7 +143,7 @@ log "gate 3b passed"
 
 log "gate 3c: routing denial for $UNCLAIMED"
 probe "$UNCLAIMED"
-if [[ $code -lt 400 ]] || ! grep -qiE 'not[ _-]?available|no provider' <<<"$body"; then
+if [[ $code -lt 400 ]] || ! grep -qiE 'model_not_routable|no provider|not[ _-]?available' <<<"$body"; then
   log "FAIL: expected a model-not-available denial, got HTTP $code: $(head -c 300 <<<"$body")"
   exit 1
 fi
@@ -193,7 +193,7 @@ if [[ $bad_model != 0 ]]; then
   jq -r '.data[] | "\(.timestamp) \(.model) \(.decision) \(.deny_reason)"' <<<"$logs" >&2
   exit 1
 fi
-for reason in 'not[ _-]?allowed' 'not[ _-]?available|no provider'; do
+for reason in 'model_blocked|allowlist|not[ _-]?allowed' 'model_not_routable|no provider|not[ _-]?available'; do
   if ! jq -r '.data[].deny_reason // empty' <<<"$logs" | grep -qiE "$reason"; then
     log "FAIL: no denial with reason matching /$reason/ in the access log"
     exit 1

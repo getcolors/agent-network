@@ -66,12 +66,22 @@ Details the installer encodes that are easy to lose:
   with `netbird-server admin token create` (create-once, atomically
   persisted, delete-by-name first so a crash never leaves an undiscoverable
   live token); then the proxy starts.
-- **TLS is TLS-ALPN-01 end to end**: Traefik for the base name; the proxy
-  runs its own ACME (`NB_PROXY_ACME_CHALLENGE_TYPE=tls-alpn-01`) for
-  generated endpoint hostnames behind Traefik's TCP `HostSNI(*)` passthrough
-  with PROXY protocol v2 (`NB_PROXY_TRUSTED_PROXIES` = Traefik's fixed
-  address). No DNS-01 anywhere; the Cloudflare token needs record-edit scope
-  only.
+- **TLS**: Traefik terminates the base name with TLS-ALPN-01; endpoint
+  hostnames ride Traefik's TCP `HostSNI(*)` passthrough with PROXY protocol
+  v2 (`NB_PROXY_TRUSTED_PROXIES` = Traefik's fixed address, and
+  `traefik.docker.network` pinned so the source address cannot float to the
+  wrong network) and are served by the proxy from a **wildcard certificate
+  issued at converge time via DNS-01 (lego, pinned and checksum-verified)**.
+  This departs from the installer, whose per-name proxy ACME is **defective
+  on the pinned 0.77.1 build**: every order dies with "no viable challenge
+  type found" against authorizations that offer tls-alpn-01, under every
+  accepted `NB_PROXY_ACME_CHALLENGE_TYPE` value, on production and staging
+  Let's Encrypt alike — and each deactivated authorization burns the CA's
+  failed-authorizations-per-hour limit, so the failure also locks the name
+  out of issuance for sliding one-hour windows. Verified against live authz
+  objects (2026-08-26); re-test per-name ACME before dropping the wildcard
+  on an image bump. Renewal is a re-converge (`create` renews under 30 days
+  left); the proxy file-watches the pair and picks a renewal up in place.
 - **The dashboard's `USE_AUTH0=false`** and the agent-network preset flag
   `NETBIRD_AGENT_NETWORK_ONLY=true`. `init_react_envs` exits 1 on a missing
   variable while supervisord carries on and nginx serves `$NETBIRD_*`
