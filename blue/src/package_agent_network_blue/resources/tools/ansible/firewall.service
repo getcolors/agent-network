@@ -1,0 +1,16 @@
+# Installs the agent-subnet DOCKER-USER rules whenever Docker (re)starts.
+# PartOf= is the load-bearing line: a Docker restart rebuilds DOCKER-USER
+# without these rules, so this unit must restart with it, not merely after it.
+[Unit]
+Description=Agent-network DOCKER-USER isolation rules
+After=docker.service
+Requires=docker.service
+PartOf=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/agent-network-firewall
+
+[Install]
+WantedBy=multi-user.target docker.service

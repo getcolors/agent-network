@@ -64,9 +64,12 @@ Every key is documented in
 ## Development
 
 ```sh
-bb test                # unit tests
-bb golden              # render both fixtures, diff against committed goldens
-./scripts/launcher.sh  # launcher self-checks
+cd green && bb test    # unit tests (canonical Clojure implementation)
+cd green && bb golden  # render both fixtures, diff against committed goldens
+cd red && bun test && bun run typecheck   # TypeScript implementation
+cd blue && uv run pytest                  # Python implementation
+./scripts/parity.sh    # all three colours render byte-identical trees
+./scripts/launcher.sh  # launcher self-checks, from the repository root
 ```
 
 Two golden fixtures, because the SSH Keypair Standard has two modes: keygen

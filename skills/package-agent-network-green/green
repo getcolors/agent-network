@@ -11,8 +11,8 @@
 ;; machine keypair and cloud resources, and overriding it from the environment
 ;; can only point agent-network at another project's state.
 ;;
-;; This file is both the skill payload and the repository entry point — ./green
-;; in the project root is a symlink to it. It deliberately holds no logic of its
+;; This file is both the skill payload and the repository entry point — green/green
+;; in the repository is a symlink to it. It deliberately holds no logic of its
 ;; own: validation, the graph and the steps all live in the `agent-network`
 ;; library, where the test suite reaches them. A copied payload is the one place
 ;; in this project where code cannot be tested, so nothing that can live
@@ -70,7 +70,7 @@
 
 (def ^:private bootstrap-error
   (when (and (System/getProperty "babashka.version") (not resolved?))
-    (let [agent-network (lib-coord "AGENT_NETWORK_LIB_ROOT" agent-network-git-url agent-network-sha nil)
+    (let [agent-network (lib-coord "AGENT_NETWORK_LIB_ROOT" agent-network-git-url agent-network-sha "green")
           green (lib-coord "GREEN_LIB_ROOT" green-git-url nil nil)
           once (lib-coord "ONCE_LIB_ROOT" once-git-url nil "green")]
       (if-not agent-network

@@ -1,0 +1,253 @@
+# The NetBird Agent Network demo, on one host: the gateway stack that serves
+# the keyless LLM endpoint, and the isolated agent that can reach nothing else.
+#
+# Derived from the agent-network preset of upstream's `getting-started.sh` —
+# Traefik, the dashboard in agent-network-only mode, one `netbird-server` that
+# is management, signal, relay and STUN in a single process, and the NetBird
+# reverse proxy in private mode — with the wizard's interactive choices lifted
+# into desired state. The installer itself is deliberately not run; see
+# CLAUDE.md.
+#
+# Two networks, and the split is the demo. `gateway` carries the stack and has
+# egress. `agent` is internal: no internet route exists on it, and its only
+# members are Traefik (the agent's management/signal/relay bootstrap), the
+# reverse proxy (the WireGuard leg), and the agent itself. What the agent can
+# reach is those two static addresses — everything else is refused by the
+# network shape and, independently, by the DOCKER-USER rules the playbook
+# installs.
+services:
+
+  traefik:
+    image: <{ agent-network-traefik-image }>
+    container_name: agent-network-traefik
+    restart: unless-stopped
+    networks:
+      gateway:
+        # Fixed, because the reverse proxy trusts exactly this address for
+        # PROXY protocol headers (NB_PROXY_TRUSTED_PROXIES).
+        ipv4_address: <{ traefik-ip }>
+      agent:
+        # Fixed, because the agent's extra_hosts maps the public hostname
+        # here: the management, signal and relay bootstrap terminates at
+        # Traefik exactly as it does from the internet, but over the internal
+        # network — the agent has no route to the public address.
+        ipv4_address: <{ traefik-agent-ip }>
+    command:
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--providers.file.filename=/etc/traefik/dynamic.yaml"
+      - "--entrypoints.web.address=:80"
+      - "--entrypoints.websecure.address=:443"
+      - "--entrypoints.web.http.redirections.entrypoint.to=websecure"
+      - "--entrypoints.web.http.redirections.entrypoint.scheme=https"
+      - "--certificatesresolvers.letsencrypt.acme.email=<{ agent-network-letsencrypt-email }>"
+      - "--certificatesresolvers.letsencrypt.acme.storage=/letsencrypt/acme.json"
+      # TLS-ALPN-01 on 443 for the base name. Generated endpoint hostnames are
+      # not Traefik's problem: the HostSNI(*) passthrough below hands their
+      # TLS to the reverse proxy, which runs its own ACME the same way.
+      - "--certificatesresolvers.letsencrypt.acme.tlschallenge=true"
+      # gRPC passes through Traefik; without these it dies at the first
+      # long-lived management stream.
+      - "--serverstransport.forwardingtimeouts.responseheadertimeout=0s"
+      - "--serverstransport.forwardingtimeouts.idleconntimeout=0s"
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./traefik-dynamic.yaml:/etc/traefik/dynamic.yaml:ro
+      - agent_network_traefik_letsencrypt:/letsencrypt
+    labels:
+      - traefik.enable=true
+      - traefik.http.middlewares.an-ratelimit.ratelimit.average=100
+      - traefik.http.middlewares.an-ratelimit.ratelimit.burst=200
+      - traefik.http.middlewares.an-secure.headers.stsSeconds=31536000
+      - traefik.http.middlewares.an-secure.headers.stsIncludeSubdomains=true
+      - traefik.http.middlewares.an-secure.headers.contentTypeNosniff=true
+      - traefik.http.middlewares.an-secure.headers.browserXssFilter=true
+      - traefik.http.middlewares.an-secure.headers.referrerPolicy=strict-origin-when-cross-origin
+    logging: &logging
+      driver: "json-file"
+      options: {max-size: "100m", max-file: "2"}
+
+  dashboard:
+    image: <{ agent-network-dashboard-image }>
+    container_name: agent-network-dashboard
+    restart: unless-stopped
+    networks: [gateway]
+    env_file: [./dashboard.env]
+    depends_on: [netbird-server]
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.an-dashboard.rule=Host(`<{ agent-network-host }>`)
+      - traefik.http.routers.an-dashboard.entrypoints=websecure
+      - traefik.http.routers.an-dashboard.tls=true
+      - traefik.http.routers.an-dashboard.tls.certresolver=letsencrypt
+      - traefik.http.routers.an-dashboard.service=an-dashboard
+      - traefik.http.routers.an-dashboard.middlewares=an-secure@docker
+      # Lowest priority: the dashboard is the catch-all for this host, and the
+      # server's routers below must win on their path prefixes.
+      - traefik.http.routers.an-dashboard.priority=1
+      - traefik.http.services.an-dashboard.loadbalancer.server.port=80
+    logging: *logging
+
+  # Management + Signal + Relay + STUN in one process.
+  netbird-server:
+    image: <{ agent-network-server-image }>
+    container_name: agent-network-server
+    restart: unless-stopped
+    networks: [gateway]
+    ports:
+      # The only UDP the firewall opens. STUN is bundled here; there is no
+      # coturn container in this architecture and therefore no TURN secret.
+      - "<{ agent-network-stun-port }>:<{ agent-network-stun-port }>/udp"
+    environment:
+      # Enables `POST /api/setup` to mint a one-time PAT, which is the only
+      # supported way to bootstrap the first owner without a browser.
+      - NB_SETUP_PAT_ENABLED=true
+    volumes:
+      - agent_network_data:/var/lib/netbird
+      - ./config.yaml:/etc/netbird/config.yaml:ro
+    command: ["--config", "/etc/netbird/config.yaml"]
+    labels:
+      - traefik.enable=true
+      # gRPC needs an h2c backend; without a separate service definition the
+      # management, signal and proxy streams never establish.
+      - traefik.http.routers.an-grpc.rule=Host(`<{ agent-network-host }>`) && (PathPrefix(`/signalexchange.SignalExchange/`) || PathPrefix(`/management.ManagementService/`) || PathPrefix(`/management.ProxyService/`))
+      - traefik.http.routers.an-grpc.entrypoints=websecure
+      - traefik.http.routers.an-grpc.tls=true
+      - traefik.http.routers.an-grpc.tls.certresolver=letsencrypt
+      - traefik.http.routers.an-grpc.service=an-server-h2c
+      - traefik.http.routers.an-grpc.priority=100
+      - traefik.http.routers.an-backend.rule=Host(`<{ agent-network-host }>`) && (PathPrefix(`/relay`) || PathPrefix(`/ws-proxy/`) || PathPrefix(`/api`) || PathPrefix(`/oauth2`))
+      - traefik.http.routers.an-backend.entrypoints=websecure
+      - traefik.http.routers.an-backend.tls=true
+      - traefik.http.routers.an-backend.tls.certresolver=letsencrypt
+      - traefik.http.routers.an-backend.service=an-server
+      - traefik.http.routers.an-backend.middlewares=an-ratelimit@docker,an-secure@docker
+      - traefik.http.routers.an-backend.priority=100
+      - traefik.http.services.an-server.loadbalancer.server.port=80
+      - traefik.http.services.an-server-h2c.loadbalancer.server.port=80
+      - traefik.http.services.an-server-h2c.loadbalancer.server.scheme=h2c
+    # No healthcheck, deliberately. The image carries neither wget nor curl, so
+    # every in-container HTTP probe fails closed and `--wait` would hang on a
+    # server that is running perfectly. Readiness is asserted from the host
+    # against the public OIDC discovery document instead.
+    logging: *logging
+
+  # The NetBird reverse proxy, private mode: the peer that serves the
+  # agent-network endpoint. Its WireGuard is an embedded userspace netstack —
+  # no capabilities, no tun device — and NB_PROXY_PRIVATE=true keeps it
+  # serving only agent-network routes to authorized peers over the tunnel.
+  proxy:
+    image: <{ agent-network-proxy-image }>
+    container_name: agent-network-proxy
+    restart: unless-stopped
+    networks:
+      gateway: {}
+      agent:
+        # Fixed, so the agent's WireGuard leg has a stable local candidate and
+        # the DOCKER-USER allow list can name it.
+        ipv4_address: <{ proxy-agent-ip }>
+    depends_on:
+      netbird-server:
+        condition: service_started
+    env_file:
+      - ./proxy.env
+    volumes:
+      - agent_network_proxy_certs:/certs
+      # The wildcard certificate pair issued at converge time (DNS-01, lego);
+      # file-watched by the proxy, so a renewal is picked up in place.
+      - /etc/agent-network/wildcard:/wildcard:ro
+    # The embedded netbird client derives the signal and relay addresses from
+    # the management configuration, which names the **public** hostname — and
+    # a container resolving that name gets this host's own public address, so
+    # the connection dies in hairpin NAT while management (reached directly at
+    # http://netbird-server:80) keeps working. Pointing the name at Traefik on
+    # the shared network keeps the URL, the certificate and the gRPC routing
+    # identical while the packet never leaves the box. The sibling `netbird`
+    # package learned this with Authentik's issuer; same lesson, one layer
+    # deeper.
+    extra_hosts:
+      - "<{ agent-network-host }>:<{ traefik-ip }>"
+    labels:
+      # TCP passthrough for any unmatched domain (the proxy handles its own
+      # TLS for generated endpoint hostnames, over PROXY protocol v2 so client
+      # addresses survive the hop).
+      - traefik.enable=true
+      # Traefik shares two networks with this container and picks one
+      # arbitrarily unless told; the proxy trusts PROXY protocol headers from
+      # exactly Traefik's gateway address, so the choice must not float.
+      - traefik.docker.network=agent-network-gateway
+      - traefik.tcp.routers.proxy-passthrough.entrypoints=websecure
+      - traefik.tcp.routers.proxy-passthrough.rule=HostSNI(`*`)
+      - traefik.tcp.routers.proxy-passthrough.tls.passthrough=true
+      - traefik.tcp.routers.proxy-passthrough.service=proxy-tls
+      - traefik.tcp.routers.proxy-passthrough.priority=1
+      - traefik.tcp.services.proxy-tls.loadbalancer.server.port=8443
+      - traefik.tcp.services.proxy-tls.loadbalancer.serverstransport=pp-v2@file
+    logging: *logging
+
+  # The isolated agent: NetBird client + headless Claude Code, attached to the
+  # internal network only. Built on this host from pinned inputs; started by
+  # the playbook only after the control plane has minted its setup key and the
+  # endpoint exists, which is why it sits behind a compose profile.
+  agent:
+    build:
+      context: ./agent
+      dockerfile: Dockerfile
+    image: agent-network-agent:local
+    container_name: agent-network-agent
+    restart: unless-stopped
+    profiles: [agent]
+    networks:
+      agent:
+        ipv4_address: <{ agent-ip }>
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    extra_hosts:
+      # The management/signal/relay bootstrap, which precedes tunnel DNS. The
+      # generated endpoint hostname is deliberately NOT mapped: management
+      # pushes authorized peers a DNS zone resolving it to the proxy's overlay
+      # address, so endpoint traffic rides the tunnel and carries the peer
+      # identity the private proxy requires.
+      - "<{ agent-network-host }>:<{ traefik-agent-ip }>"
+    env_file:
+      # Written by the playbook after bootstrap, when the endpoint hostname
+      # exists. Carries no secret: the whole point is that the agent holds no
+      # API key.
+      - ./agent.env
+    volumes:
+      - agent_network_agent_state:/var/lib/netbird
+      # tmpfs on the host: the one-off setup key passes through here and is
+      # removed after enrollment. Never a persistent path, never compose
+      # config, never argv.
+      - /run/agent-network:/var/run/agent-secret:ro
+    logging: *logging
+
+volumes:
+  agent_network_data:
+  agent_network_traefik_letsencrypt:
+  agent_network_proxy_certs:
+  agent_network_agent_state:
+
+networks:
+  gateway:
+    driver: bridge
+    # Explicit, because the traefik.docker.network label above must name it
+    # exactly and Compose's default (directory-derived) project prefix is not
+    # a contract.
+    name: agent-network-gateway
+    ipam:
+      config:
+        - subnet: <{ agent-network-gateway-subnet }>
+  agent:
+    driver: bridge
+    name: agent-network-agent
+    # No internet route exists on this network. This is the first isolation
+    # boundary; the DOCKER-USER rules the playbook installs are the second,
+    # independent one.
+    internal: true
+    ipam:
+      config:
+        - subnet: <{ agent-network-agent-subnet }>

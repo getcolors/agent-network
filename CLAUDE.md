@@ -2,7 +2,7 @@
 
 ## Repository
 
-`agent-network` is a Green-only Package Skill for a minimal, single-node demo
+`agent-network` is a tri-colour Package Skill (green, red, blue) for a minimal, single-node demo
 of [NetBird Agent Network](https://docs.netbird.io/agent-network) — keyless,
 identity-gated LLM access — on one Vultr instance. OpenTofu manages the
 instance, a firewall (22/80/443 TCP and 3478 UDP) and two unproxied Cloudflare
@@ -150,17 +150,33 @@ says so plainly; do not add backups without revisiting that decision.
 
 ## Commands
 
+The three implementations live in the tri-colour layout, matching `airflow`:
+canonical Clojure in `green/` (`green/bb.edn`, `green/deps.edn`, `green/src/`,
+`green/tasks/`, tests under `green/test/clj`), TypeScript/Bun in `red/`, and
+Python/uv in `blue/`. Green is canonical: a behavioural change lands in all
+three colours in the same commit and passes `scripts/parity.sh`, which renders
+both fixtures through every colour and diffs the trees — and the colour
+template trees (`red/resources`, blue's embedded `resources/`) — byte for byte.
+The two fixtures and the goldens are shared across colours at the repository
+root — `test/fixtures/` and `test/resources/golden/` — with
+`green/test/fixtures` and `green/test/resources` symlinks pointing at them.
+Each colour dir holds a launcher symlink to its skill payload (`green/green`,
+`red/red`, `blue/blue`).
+
 ```sh
-bb test                # 87 tests
-bb golden              # two fixtures (keygen + opt-out), byte-for-byte
-bb golden:accept       # after an intended change — read the diff first
-./scripts/launcher.sh  # launcher self-checks
-bb pin                 # stamp the launcher after a push
+cd green && bb test           # 87 tests
+cd green && bb golden         # two fixtures (keygen + opt-out), byte-for-byte
+cd green && bb golden:accept  # after an intended change — read the diff first
+cd red && bun test && bun run typecheck
+cd blue && uv run pytest
+./scripts/parity.sh           # three colours, two fixtures, byte for byte
+./scripts/launcher.sh         # launcher self-checks, from the repository root
+cd green && bb pin            # stamp the three payloads after a push
 ```
 
 Working-tree overrides: `AGENT_NETWORK_LIB_ROOT`, `GREEN_LIB_ROOT`,
 `ONCE_LIB_ROOT` — absolute paths, because `scripts/launcher.sh` runs from a
-temp directory. The root `./green` is a symlink to the skill payload inside
+temp directory. `green/green` is a symlink to the skill payload inside
 this repo; in a deployment it is a **copy** that must be refreshed after
 `npx skills update -p`.
 
