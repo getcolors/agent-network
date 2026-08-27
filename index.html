@@ -13,9 +13,9 @@
 <script src="https://rybbit.getcolors.ai/api/script.js" data-site-id="9fb9c41a6d49" defer></script>
 </head>
 <body><main>
-  <p class="eyebrow">GREEN PACKAGE SKILL · VULTR · NETBIRD AGENT NETWORK · CLAUDE CODE</p>
+  <p class="eyebrow">GREEN · RED · BLUE PACKAGE SKILL · VULTR · NETBIRD AGENT NETWORK · CLAUDE CODE</p>
   <h1>Agent Network Package Skill</h1>
-  <p class="lead">A reproducible Green workflow for a minimal <a href="https://docs.netbird.io/agent-network">NetBird Agent Network</a> demo: a keyless, policy-gated LLM endpoint on one guarded Vultr instance — and an isolated agent container that can reach nothing else.</p>
+  <p class="lead">A reproducible Green, Red, and Blue workflow for a minimal <a href="https://docs.netbird.io/agent-network">NetBird Agent Network</a> demo: a keyless, policy-gated LLM endpoint on one guarded Vultr instance — and an isolated agent container that can reach nothing else.</p>
 
   <div class="callout"><strong>The isolation is the demo.</strong> The agent container sits on an internal Docker network with no internet route, doubled by DOCKER-USER firewall rules. Its only path to an LLM is the agent-network endpoint over its WireGuard tunnel, where the request carries the peer's identity, passes the policy, hits the model allowlist and the budget caps, and lands in the access log — with the Anthropic key held server-side, never in the container.</div>
 
@@ -25,6 +25,7 @@ cp .agents/skills/package-agent-network-green/green ./green
 chmod +x green
 ./green build
 ./green create --dry-run</code></pre>
+<p>Equivalent Red and Blue skills ship <code>red</code> and <code>blue</code> launchers.</p>
   <p>Build renders reproducible output and dry-run walks the workflow without provider side effects. Real creation and deletion require explicit authorization.</p>
 
   <h2>Architecture</h2>
