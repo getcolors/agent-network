@@ -1,28 +1,20 @@
 #!/usr/bin/env -S uv run --script
 # /// script
 # requires-python = ">=3.11"
-# dependencies = []
+# dependencies = ["package-agent-network-blue", "blue"]
+#
+# [tool.uv.sources]
+# package-agent-network-blue = { git = "https://github.com/getcolors/agent-network.git", rev = "bf51dbe9feb046682a4b3f4bf5b7903be026a43a", subdirectory = "blue" }
+# blue = { git = "https://github.com/getcolors/blue.git", rev = "290f313ead5ca162875c33a049c880da017eae09" }
+#
+# [tool.uv]
+# override-dependencies = ["blue @ git+https://github.com/getcolors/blue.git@290f313ead5ca162875c33a049c880da017eae09"]
 # ///
 #
 # Managed by `bb pin` — do not edit by hand, and never invent a SHA.
 #
-# UNPINNED: this repository has not been pushed and stamped, so the inline
-# metadata above deliberately carries no package-agent-network-blue git
-# source. A launcher that cannot resolve its own library says so rather than
-# inventing a SHA or silently falling back to whatever is lying around;
-# `bb pin` refuses to stamp a dirty or unpushed HEAD for the same reason.
-# Once stamped, the block above reads:
-#
-#   # dependencies = ["package-agent-network-blue", "blue"]
-#   #
-#   # [tool.uv.sources]
-#   # package-agent-network-blue = { git = "https://github.com/getcolors/agent-network.git", rev = "<sha stamped by bb pin>", subdirectory = "blue" }
-#   # blue = { git = "https://github.com/getcolors/blue.git", rev = "290f313ead5ca162875c33a049c880da017eae09" }
-#   #
-#   # [tool.uv]
-#   # override-dependencies = ["blue @ git+https://github.com/getcolors/blue.git@290f313ead5ca162875c33a049c880da017eae09"]
-#
-# Point it at a checkout meanwhile: AGENT_NETWORK_LIB_ROOT=/path/to/agent-network
+# Stamped by `bb pin`. AGENT_NETWORK_LIB_ROOT=/path/to/agent-network still
+# overrides the pin with a working tree.
 """Thin launcher for package-agent-network-blue.
 
 This file is both the skill payload and the repository entry point —
