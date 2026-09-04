@@ -4,8 +4,9 @@
 
 `agent-network` is a tri-colour Package Skill (green, red, blue) for a minimal, single-node demo
 of [NetBird Agent Network](https://docs.netbird.io/agent-network) — keyless,
-identity-gated LLM access — on one Vultr instance. OpenTofu manages the
-instance, a firewall (22/80/443 TCP and 3478 UDP) and two unproxied Cloudflare
+identity-gated LLM access — on one Vultr instance or one DigitalOcean
+droplet. OpenTofu manages the machine, a provider firewall (22/80/443 TCP and
+3478 UDP, the same rule set on both providers) and two unproxied Cloudflare
 `A` records: the base name and its **wildcard**. Ansible converges a Docker
 Compose stack of Traefik, the combined `netbird-server`, the dashboard in
 agent-network-only mode, and the NetBird reverse proxy in private mode; then
@@ -18,6 +19,47 @@ server, same launcher/goldens/standards conformance, opposite emphasis (that
 one is a production control plane with Authentik; this one is a demo whose
 product is an isolation claim). Read its CLAUDE.md for the combined-server
 background; differences below are deliberate.
+
+## Two compute providers
+
+The package follows the workspace Compute Provider Standard
+(`../workspace/standards/compute-provider.md`), with `clickstack` as the
+reference shape. Providers are selected by template directory —
+`tools/infrastructure/vultr/` and `tools/infrastructure/digitalocean/` —
+never by conditionals, so a build is the only thing that proves a provider's
+tree renders at all. The registry is `compute-providers` in `validate.clj`
+(mirrored in `validate.ts` and `validate.py`): provider name to its required
+keys, its secret (`:vultr-api-key` or `:do-token`), and the environment
+variable OpenTofu reads it from. Keys of the unselected provider are accepted
+and ignored, so one `colors.yml` moves between providers by one edit.
+`<provider>-name` is optional and resolves through `compute-name`, profile by
+default; `compute-key` is how the shared steps reach `<provider>-ssh-sources`,
+`<provider>-http-sources` and — the one thing this package adds to the
+standard's two lists — `<provider>-stun-sources`, because STUN over UDP is a
+published port here and every provider's firewall mirrors the whole rule set.
+Every entry of all three lists must be a syntactically valid IPv4 or IPv6
+CIDR and the SSH list must not be empty, refused before any provider call; an
+empty HTTP or STUN list means that service is not public. The DigitalOcean
+template emits the 80/443 and STUN rules through `dynamic` blocks because a
+DigitalOcean inbound rule with no source is an API error, not a closed port,
+and joins the region's default VPC discovered at plan time —
+`digitalocean-vpc-uuid` and `digitalocean-vpc-cidr` are refused.
+
+Every provider's compute stage outputs the same `params` —
+`{provider, ip, user, sudoer, name, ssh_key_id (keygen only)}` — and
+`provider` is the switch guard. Both providers share one state key, so
+`start-step` reads the state once, up front, with backend credentials alone,
+and a validator placed after `state-errors` and before the credential check
+refuses a real create or delete whose recorded provider differs from the
+selected one (`state holds a <recorded> machine; set provider-compute back to
+<recorded> and delete first`). A recorded `params` without `provider`
+predates this package recording one and is treated as Vultr. An unreadable
+backend is no state on a real create and fails a real delete closed
+(`adopt-state`); a real create whose compute output carries no `ip` refuses to
+converge against the documentation address (`resolved-compute`). The
+Vultr golden changed by exactly the `provider = "vultr"` line through
+adoption, and `agent-network-vultr` — created before adoption, with no
+recorded provider — keeps working on Vultr unchanged.
 
 ## The demo's claim, and where it is enforced
 
@@ -155,21 +197,21 @@ canonical Clojure in `green/` (`green/bb.edn`, `green/deps.edn`, `green/src/`,
 `green/tasks/`, tests under `green/test/clj`), TypeScript/Bun in `red/`, and
 Python/uv in `blue/`. Green is canonical: a behavioural change lands in all
 three colours in the same commit and passes `scripts/parity.sh`, which renders
-both fixtures through every colour and diffs the trees — and the colour
+all four fixtures through every colour and diffs the trees — and the colour
 template trees (`red/resources`, blue's embedded `resources/`) — byte for byte.
-The two fixtures and the goldens are shared across colours at the repository
+The four fixtures and the goldens are shared across colours at the repository
 root — `test/fixtures/` and `test/resources/golden/` — with
 `green/test/fixtures` and `green/test/resources` symlinks pointing at them.
 Each colour dir holds a launcher symlink to its skill payload (`green/green`,
 `red/red`, `blue/blue`).
 
 ```sh
-cd green && bb test           # 87 tests
-cd green && bb golden         # two fixtures (keygen + opt-out), byte-for-byte
+cd green && bb test           # 116 tests
+cd green && bb golden         # four fixtures (keygen + opt-out, Vultr + DigitalOcean), byte-for-byte
 cd green && bb golden:accept  # after an intended change — read the diff first
 cd red && bun test && bun run typecheck
 cd blue && uv run pytest
-./scripts/parity.sh           # three colours, two fixtures, byte for byte
+./scripts/parity.sh           # three colours, four fixtures, byte for byte
 ./scripts/launcher.sh         # launcher self-checks, from the repository root
 cd green && bb pin            # stamp the three payloads after a push
 ```

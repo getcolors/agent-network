@@ -115,6 +115,7 @@ resource "vultr_instance" "agent_network" {
 
 output "params" {
   value = {
+    provider = "vultr"
     ip     = vultr_instance.agent_network.main_ip
     user   = "root"
     sudoer = "root"

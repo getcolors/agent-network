@@ -5,7 +5,7 @@
             [clojure.test :refer [deftest is]]
             [io.github.getcolors.agent-network.tools :as tools]
             [io.github.getcolors.agent-network.validate :as validate]
-            [io.github.getcolors.agent-network.validate-test :refer [fixture optout]]))
+            [io.github.getcolors.agent-network.validate-test :refer [fixture optout do-fixture do-optout]]))
 
 (defn- spec-for [opts file]
   (some #(when (str/ends-with? (str (:target %)) file) %) (tools/ansible-specs opts)))
@@ -17,7 +17,63 @@
 
 (deftest infrastructure-data-carries-the-ssh-mode
   (is (true? (:ssh-keygen (tools/infrastructure-data (fixture)))))
-  (is (false? (:ssh-keygen (tools/infrastructure-data (optout))))))
+  (is (false? (:ssh-keygen (tools/infrastructure-data (optout)))))
+  (is (true? (:ssh-keygen (tools/infrastructure-data (do-fixture)))))
+  (is (false? (:ssh-keygen (tools/infrastructure-data (do-optout))))))
+
+(deftest infrastructure-data-reads-the-selected-providers-keys
+  ;; The template interpolates one resolved name and one resolved list per
+  ;; port, whichever provider they came from — the STUN list included.
+  (let [data (tools/infrastructure-data (do-fixture :digitalocean-ssh-sources ["10.0.0.0/8"]
+                                                    :digitalocean-stun-sources ["198.51.100.0/24"]
+                                                    :vultr-ssh-sources ["192.0.2.0/24"]))]
+    (is (= "[\"10.0.0.0/8\"]" (:ssh-sources-hcl data)))
+    (is (= "[\"198.51.100.0/24\"]" (:stun-sources-hcl data)))
+    (is (= "agent-network-digitalocean-fixture" (:compute-name data))))
+  (is (= "agent-network-fixture" (:compute-name (tools/infrastructure-data (fixture))))))
+
+(deftest template-directory-follows-the-provider
+  (is (= :io.github.getcolors.agent-network.tools.infrastructure.vultr/main.tf
+         (tools/infrastructure-template (fixture))))
+  (is (= :io.github.getcolors.agent-network.tools.infrastructure.digitalocean/main.tf
+         (tools/infrastructure-template (do-fixture))))
+  ;; A registry entry without a template directory would pass every unit test
+  ;; and fail the first build.
+  (doseq [provider (keys validate/compute-providers)]
+    (is (io/resource (str "io/github/getcolors/agent-network/tools/infrastructure/" provider "/main.tf"))
+        provider)))
+
+(deftest every-provider-template-mirrors-the-whole-rule-set
+  ;; The firewall admits 22, 80/443 and STUN over UDP on every provider, and
+  ;; records which provider produced the params.
+  (doseq [provider (keys validate/compute-providers)]
+    (let [tf (slurp (io/resource (str "io/github/getcolors/agent-network/tools/infrastructure/" provider "/main.tf")))]
+      (is (str/includes? tf "ssh-sources-hcl") provider)
+      (is (str/includes? tf "http-sources-hcl") provider)
+      (is (str/includes? tf "stun-sources-hcl") provider)
+      (is (str/includes? tf "\"udp\"") provider)
+      (is (str/includes? tf "<{ agent-network-stun-port }>") provider)
+      (is (str/includes? tf (str "provider = \"" provider "\"")) provider))))
+
+(deftest fallback-params-are-shaped-per-provider
+  (is (= {:provider "vultr" :ip "192.0.2.10" :user "root" :sudoer "root" :name "agent-network-fixture"}
+         (tools/fallback-params (fixture))))
+  (is (= {:provider "digitalocean" :ip "192.0.2.10" :user "root" :sudoer "root"
+          :name "agent-network-digitalocean-fixture"}
+         (tools/fallback-params (do-fixture)))))
+
+(deftest a-real-create-refuses-a-missing-ip-output
+  ;; 192.0.2.10 is the documentation address build renders with; a real
+  ;; converge must never fall back to it.
+  (let [refused (tools/resolved-compute {} (tools/fallback-params (fixture)) nil)]
+    (is (= 1 (:green/exit refused)))
+    (is (str/includes? (:green/err refused) "compute produced no ip output")))
+  (let [refused (tools/resolved-compute {} (tools/fallback-params (fixture)) {:name "x"})]
+    (is (= 1 (:green/exit refused))))
+  (let [ok (tools/resolved-compute {} (tools/fallback-params (fixture))
+                                   {:ip "203.0.113.9" :provider "vultr"})]
+    (is (nil? (:green/exit ok)))
+    (is (= "203.0.113.9" (:ip ok)))))
 
 (deftest every-label-derives-from-one-resolved-name
   ;; Compute Name Standard §3: one function answers "what is this deployment's

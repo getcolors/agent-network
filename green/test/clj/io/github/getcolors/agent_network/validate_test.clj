@@ -6,15 +6,157 @@
 
 (def fixture-file "test/fixtures/colors.yml")
 (def optout-file "test/fixtures/optout.yml")
+(def do-fixture-file "test/fixtures/colors-digitalocean.yml")
+(def do-optout-file "test/fixtures/optout-digitalocean.yml")
 
 (defn- read-fixture [path overrides]
   (merge (green-cli/read-state path (str/replace (slurp path) "WORKDIR" ".colors"))
          overrides))
 (defn fixture [& {:as overrides}] (read-fixture fixture-file overrides))
 (defn optout [& {:as overrides}] (read-fixture optout-file overrides))
+(defn do-fixture [& {:as overrides}] (read-fixture do-fixture-file overrides))
+(defn do-optout [& {:as overrides}] (read-fixture do-optout-file overrides))
 
 (deftest fixture-is-valid (is (= [] (validate/state-errors (fixture)))))
 (deftest optout-fixture-is-valid (is (= [] (validate/state-errors (optout)))))
+
+(deftest digitalocean-fixtures-are-valid
+  (is (= [] (validate/state-errors (do-fixture))))
+  (is (= [] (validate/state-errors (do-optout)))))
+
+;; --- the compute-provider registry (Compute Provider Standard) --------------
+
+(deftest unsupported-provider-names-the-advertised-ones
+  (is (some #{":provider-compute must be one of digitalocean, vultr"}
+            (validate/state-errors (fixture :provider-compute "hetzner")))))
+
+(deftest required-keys-follow-the-selected-provider
+  (is (some #{":digitalocean-size is required"}
+            (validate/state-errors (do-fixture :digitalocean-size nil))))
+  (is (some #{":digitalocean-stun-sources is required"}
+            (validate/state-errors (do-fixture :digitalocean-stun-sources nil))))
+  (is (some #{":vultr-plan is required"}
+            (validate/state-errors (fixture :vultr-plan nil))))
+  ;; The other provider's keys are neither required nor refused, so one
+  ;; colors.yml can carry both and move between providers by one edit.
+  (is (not-any? #(str/includes? % "vultr") (validate/state-errors (do-fixture))))
+  (is (= [] (validate/state-errors (fixture :digitalocean-region "ams3"
+                                            :digitalocean-size "s-1vcpu-1gb"))))
+  (is (= [] (validate/state-errors (do-fixture :vultr-os-id "not-checked-here")))))
+
+(deftest name-and-machine-key-are-never-required
+  (doseq [errors [(validate/state-errors (fixture :vultr-name nil))
+                  (validate/state-errors (do-fixture))]]
+    (is (not-any? #(str/includes? % "-name") errors))
+    (is (not-any? #(str/includes? % "-ssh-keys") errors))))
+
+(deftest vultr-os-id-is-checked-on-vultr-only
+  (is (some #{":vultr-os-id must be Vultr's numeric operating-system id"}
+            (validate/state-errors (fixture :vultr-os-id "2284"))))
+  (is (= [] (validate/state-errors (do-fixture :vultr-os-id "2284")))))
+
+(deftest digitalocean-refuses-a-pinned-or-created-vpc
+  (let [errors (validate/state-errors (do-fixture :digitalocean-vpc-uuid "abc"
+                                                  :digitalocean-vpc-cidr "10.0.0.0/16"))]
+    (is (some #(str/starts-with? % ":digitalocean-vpc-uuid must be absent") errors))
+    (is (some #(str/starts-with? % ":digitalocean-vpc-cidr must be absent") errors)))
+  ;; An unselected provider's keys are ignored, VPC keys included.
+  (is (= [] (validate/state-errors (fixture :digitalocean-vpc-uuid "abc")))))
+
+(deftest compute-key-is-provider-scoped
+  (is (= :vultr-ssh-sources (validate/compute-key (fixture) "ssh-sources")))
+  (is (= :digitalocean-stun-sources (validate/compute-key (do-fixture) "stun-sources"))))
+
+(deftest the-name-override-is-read-from-the-selected-provider-alone
+  (is (= "agent-network-digitalocean-fixture" (validate/compute-name (do-fixture))))
+  (is (= "agent-network-digitalocean-optout" (validate/compute-name (do-optout))))
+  (is (= "agent-network-digitalocean-fixture"
+         (validate/compute-name (do-fixture :vultr-name "custom-label"))))
+  (is (= "droplet-01" (validate/compute-name (do-fixture :digitalocean-name "droplet-01")))))
+
+(deftest the-name-override-follows-the-providers-rules
+  ;; Vultr labels are console text; DigitalOcean droplet names are hostnames,
+  ;; so an underscore that Vultr accepts fails at DigitalOcean.
+  (is (some #{":vultr-name must be a safe 1-63 character name"}
+            (validate/state-errors (fixture :vultr-name (apply str (repeat 64 "a"))))))
+  (is (= [] (validate/state-errors (fixture :vultr-name "invalid_name"))))
+  (let [err ":digitalocean-name must be a hostname-like name: lowercase letters, digits, dots and hyphens, 1-63 characters"]
+    (doseq [bad ["invalid_name" "Upper" "-leading" (apply str (repeat 64 "a"))]]
+      (is (some #{err} (validate/state-errors (do-fixture :digitalocean-name bad))) bad))
+    (is (= [] (validate/state-errors (do-fixture :digitalocean-name "agent.net-01"))))))
+
+(deftest the-resolved-name-is-validated-when-the-profile-is-the-name
+  ;; With no override the profile *is* the machine name, so it is held to the
+  ;; selected provider's rule too; the error names where the value came from.
+  (let [err ":profile (the digitalocean machine name) must be a hostname-like name: lowercase letters, digits, dots and hyphens, 1-63 characters"]
+    (is (some #{err} (validate/state-errors (do-fixture :profile "Prod_Name"))))
+    ;; Vultr accepts the same profile as a label.
+    (is (= [] (validate/state-errors (fixture :profile "Prod_Name"))))
+    ;; A valid override shadows an invalid profile.
+    (is (= [] (validate/state-errors (do-fixture :profile "Prod_Name" :digitalocean-name "droplet-01"))))
+    ;; An invalid override reports the override's key, not the profile's.
+    (let [errors (validate/state-errors (do-fixture :profile "Prod_Name" :digitalocean-name "Bad_Name"))]
+      (is (some #(str/starts-with? % ":digitalocean-name must be") errors))
+      (is (not-any? #(str/starts-with? % ":profile") errors)))
+    ;; A missing profile is `is required` alone, never a name error.
+    (let [errors (validate/state-errors (do-fixture :profile nil))]
+      (is (some #{":profile is required"} errors))
+      (is (not-any? #(str/includes? % "machine name") errors)))))
+
+;; --- the network contract --------------------------------------------------
+
+(deftest cidr-syntax
+  (doseq [ok ["0.0.0.0/0" "10.0.0.0/8" "203.0.113.7/32" "::/0" "2001:db8::/32"
+              "fe80::1/128" "2001:db8:0:0:0:0:0:1/64"
+              ;; IPv4-embedded: a dotted quad in last position stands for two groups.
+              "::ffff:192.0.2.1/128" "64:ff9b::192.0.2.33/96" "1:2:3:4:5:6:192.0.2.1/128"]]
+    (is (validate/cidr? ok) ok))
+  (doseq [bad ["10.0.0.0" "10.0.0.256/8" "10.0.0.0/33" "2001:db8::/129" "example.com/24"
+               "1:::2/64" "2001:db8::1::2/64" "1:2:3:4:5:6:7:8:9/64" "" "/24" "10.0.0.0/8/8"
+               ;; a bad quad, a short quad, too many groups, a quad not in last position
+               "::ffff:192.0.2.256/128" "::ffff:192.0.2/128" "1:2:3:4:5:6:7:192.0.2.1/128"
+               "192.0.2.1::/64" "::ffff:192.0.2.1:1/128"]]
+    (is (not (validate/cidr? bad)) bad)))
+
+(deftest ssh-sources-must-not-be-empty
+  (is (some #{":vultr-ssh-sources must list at least one CIDR"}
+            (validate/state-errors (fixture :vultr-ssh-sources []))))
+  (is (some #{":digitalocean-ssh-sources must list at least one CIDR"}
+            (validate/state-errors (do-fixture :digitalocean-ssh-sources " , "))))
+  ;; No public HTTP, or no public STUN, is a legitimate deployment.
+  (is (= [] (validate/state-errors (fixture :vultr-http-sources []))))
+  (is (= [] (validate/state-errors (fixture :vultr-stun-sources []))))
+  (is (= [] (validate/state-errors (do-fixture :digitalocean-http-sources []))))
+  (is (= [] (validate/state-errors (do-fixture :digitalocean-stun-sources [])))))
+
+(deftest malformed-sources-are-refused-before-any-provider-call
+  (is (some #{":vultr-http-sources entry \"10.0.0.0\" is not an IPv4 or IPv6 CIDR"}
+            (validate/state-errors (fixture :vultr-http-sources ["0.0.0.0/0" "10.0.0.0"]))))
+  (is (some #{":vultr-stun-sources entry \"stun.example.com/32\" is not an IPv4 or IPv6 CIDR"}
+            (validate/state-errors (fixture :vultr-stun-sources ["stun.example.com/32"]))))
+  (is (some #{":digitalocean-ssh-sources entry \"office.example.com/32\" is not an IPv4 or IPv6 CIDR"}
+            (validate/state-errors (do-fixture :digitalocean-ssh-sources "office.example.com/32"))))
+  ;; Only the selected provider's lists are checked.
+  (is (= [] (validate/state-errors (do-fixture :vultr-ssh-sources ["garbage"])))))
+
+;; --- provider switching is a rebuild ---------------------------------------
+
+(deftest provider-state-is-compared-with-the-selection
+  (is (nil? (validate/provider-state-errors (fixture) nil)))
+  (is (nil? (validate/provider-state-errors (fixture) {:provider "vultr" :ip "203.0.113.9"})))
+  (is (nil? (validate/provider-state-errors (do-fixture) {:provider "digitalocean"})))
+  (is (= ["state holds a digitalocean machine; set provider-compute back to digitalocean and delete first"]
+         (validate/provider-state-errors (fixture) {:provider "digitalocean" :ip "203.0.113.9"})))
+  (is (= ["state holds a vultr machine; set provider-compute back to vultr and delete first"]
+         (validate/provider-state-errors (do-fixture) {:provider "vultr"}))))
+
+(deftest legacy-state-without-a-provider-is-the-default-providers
+  ;; Every deployment created before adoption recorded no provider and runs
+  ;; the only provider the package ever offered.
+  (is (nil? (validate/provider-state-errors (fixture) {:ip "203.0.113.9"})))
+  (let [[err] (validate/provider-state-errors (do-fixture) {:ip "203.0.113.9"})]
+    (is (str/includes? err "no recorded provider"))
+    (is (str/includes? err "set provider-compute back to vultr and delete first"))))
 
 (deftest machine-key-is-not-required
   ;; The standard makes absence meaningful: requiring vultr-ssh-keys would make
@@ -60,15 +202,14 @@
                 (fixture :agent-network-host "bad"
                          :agent-network-server-image "floating"
                          :agent-network-letsencrypt-email "not-an-email"
-                         :provider-dns "other" :provider-compute "digitalocean"
+                         :provider-dns "other" :provider-compute "hetzner"
                          :agent-network-log-retention-days 0
                          :agent-network-stun-port 70000
                          :agent-network-gateway-subnet "nonsense"
-                         :agent-network-claude-code-version "latest"
-                         :vultr-os-id "2284"))]
-    (is (<= 9 (count errors)))
+                         :agent-network-claude-code-version "latest"))]
+    (is (<= 8 (count errors)))
     (doseq [part ["host" "image" "letsencrypt-email" "provider-dns" "provider-compute"
-                  "os-id" "retention-days" "stun-port" "gateway-subnet"
+                  "retention-days" "stun-port" "gateway-subnet"
                   "claude-code-version"]]
       (is (some #(str/includes? % part) errors) part))))
 
@@ -170,7 +311,18 @@
     ;; Generated on the host and supplied by nobody.
     (doseq [absent ["RELAY" "SESSION" "ENCRYPTION_KEY" "PROXY_TOKEN"
                     "ADMIN_PASSWORD" "SETUP_KEY" "PAT"]]
-      (is (not (str/includes? errors absent)) absent))))
+      (is (not (str/includes? errors absent)) absent))
+    (is (not (str/includes? errors "COLORS_PAR_DO_TOKEN")))))
+
+(deftest secrets-and-tofu-env-follow-the-selected-provider
+  (let [errors (str/join "\n" (validate/secret-errors (do-fixture) :create))]
+    (is (str/includes? errors "COLORS_PAR_DO_TOKEN"))
+    (is (str/includes? errors "COLORS_PAR_CLOUDFLARE_API_TOKEN"))
+    (is (str/includes? errors "COLORS_PAR_ANTHROPIC_API_KEY"))
+    (is (not (str/includes? errors "COLORS_PAR_VULTR_API_KEY"))))
+  (is (= {:do-token "DIGITALOCEAN_TOKEN"} (validate/tofu-env (do-fixture) :provider-compute)))
+  (is (= {:vultr-api-key "VULTR_API_KEY"} (validate/tofu-env (fixture) :provider-compute)))
+  (is (= {} (validate/tofu-env (fixture :provider-compute "hetzner") :provider-compute))))
 
 (deftest a-delete-does-not-ask-for-the-anthropic-key
   ;; This deployment is disposable: a delete needs the provider credentials

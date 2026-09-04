@@ -1,11 +1,13 @@
 # agent-network
 
-A Green Package Skill that provisions a minimal, single-node demo of
+A tri-colour Package Skill (green, red, blue) that provisions a minimal,
+single-node demo of
 [NetBird Agent Network](https://docs.netbird.io/agent-network) — keyless,
-identity-gated LLM access — on one Vultr instance, from a single `colors.yml`.
+identity-gated LLM access — on one Vultr instance or one DigitalOcean
+droplet, from a single `colors.yml`.
 
-OpenTofu manages the instance, its firewall and two unproxied Cloudflare `A`
-records (the base name and its wildcard). Ansible converges Traefik, the
+OpenTofu manages the machine, its provider firewall and two unproxied
+Cloudflare `A` records (the base name and its wildcard). Ansible converges Traefik, the
 combined `netbird-server`, the dashboard in agent-network-only mode, and the
 NetBird reverse proxy in private mode; bootstraps the control plane headlessly
 (admin account, endpoint, Anthropic provider, model-allowlist guardrail,
@@ -44,9 +46,28 @@ no credentials. Real creation and deletion require explicit authorization.
 | UDP 3478 | STUN, bundled into `netbird-server` |
 | `agent-network-agent` | the isolated agent container: NetBird client + Claude Code, no egress |
 
-The firewall opens 22, 80 and 443 TCP and 3478 UDP, and nothing more. No
-WireGuard port is published: the only peer lives on the internal Docker
-network.
+The provider firewall — Vultr's or DigitalOcean's, the same rule set on both
+— opens 22, 80 and 443 TCP and 3478 UDP, and nothing more. No WireGuard port
+is published: the only peer lives on the internal Docker network.
+
+## Two compute providers
+
+`provider-compute` selects `vultr` or `digitalocean`. Each provider is a
+template directory of its own, with its own credential
+(`COLORS_PAR_VULTR_API_KEY` or `COLORS_PAR_DO_TOKEN`) and its own
+provider-scoped keys (`vultr-region`, `vultr-plan`, `vultr-os-id`;
+`digitalocean-region`, `digitalocean-size`, `digitalocean-image`; and
+`<provider>-ssh-sources` / `<provider>-http-sources` /
+`<provider>-stun-sources` on both). Keys of the unselected provider are
+ignored, so one `colors.yml` can carry both. `<provider>-name` is optional
+and defaults to the profile, and keygen mode — the package owning
+`~/.ssh/<profile>` when `<provider>-ssh-keys` is absent — works on both. On
+DigitalOcean the droplet joins the region's default VPC, discovered at plan
+time; the package creates none.
+
+Switching providers is a rebuild, never an apply: a profile whose state
+already holds a machine refuses a create or delete under a different
+`provider-compute` until it is set back and deleted.
 
 ## Fake-key mode
 
@@ -65,17 +86,19 @@ Every key is documented in
 
 ```sh
 cd green && bb test    # unit tests (canonical Clojure implementation)
-cd green && bb golden  # render both fixtures, diff against committed goldens
+cd green && bb golden  # render all four fixtures, diff against committed goldens
 cd red && bun test && bun run typecheck   # TypeScript implementation
 cd blue && uv run pytest                  # Python implementation
-./scripts/parity.sh    # all three colours render byte-identical trees
+./scripts/parity.sh    # all three colours render byte-identical trees, both providers
 ./scripts/launcher.sh  # launcher self-checks, from the repository root
 ```
 
-Two golden fixtures, because the SSH Keypair Standard has two modes: keygen
-(the package owns `~/.ssh/<profile>`) and opt-out (an explicit account key
-id). Cross-repo development uses `AGENT_NETWORK_LIB_ROOT`, `GREEN_LIB_ROOT`
-and `ONCE_LIB_ROOT` as working-tree overrides.
+Four golden fixtures — one per compute provider per keypair mode, because
+the SSH Keypair Standard has two modes (keygen, where the package owns
+`~/.ssh/<profile>`, and opt-out, an explicit account key id) and a provider
+is only advertised by a golden that proves its tree renders. Cross-repo
+development uses `AGENT_NETWORK_LIB_ROOT`, `GREEN_LIB_ROOT` and
+`ONCE_LIB_ROOT` as working-tree overrides.
 
 ## Disposability
 

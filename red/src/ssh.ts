@@ -1,10 +1,11 @@
 // The deployment's machine keypair, per the workspace SSH Keypair Standard.
 //
 // The behaviour itself is ONCE's (red/src/ssh.ts in getcolors/once): keygen
-// mode when desired state carries no `vultr-ssh-keys`, an ed25519 key named
-// after the profile in `~/.ssh`, the create matrix, the Vultr REST preflight,
-// and a cleanup that runs only after a successful destroy. Reusing it rather
-// than reimplementing means one standard has one implementation, and a fix
+// mode when desired state carries no `<provider>-ssh-keys` for the selected
+// compute provider, an ed25519 key named after the profile in `~/.ssh`, the
+// create matrix, the provider REST preflight (DigitalOcean and Vultr, each with
+// its own token), and a cleanup that runs only after a successful destroy.
+// Reusing it rather than reimplementing means one standard has one implementation, and a fix
 // upstream reaches this package when the pin moves. See once.ts for how the
 // unexported module is resolved.
 //
@@ -35,7 +36,10 @@ export function renderedOnly(opts: Opts): boolean {
 }
 
 // Fill the template values keygen mode owns. Opt-out opts pass through
-// untouched, byte-for-byte as before the standard.
+// untouched, byte-for-byte as before the standard. The placeholder public-key
+// path lands on whichever key the selected provider takes the machine key
+// through — ONCE's table, not a literal, so a second provider needs no second
+// branch here.
 export function withMachineKey(opts: Opts): Opts {
   if (!keygen(opts)) return opts;
   const build = renderedOnly(opts);
@@ -48,7 +52,7 @@ export function withMachineKey(opts: Opts): Opts {
     ...filled,
     "ssh-private-key-path": prv,
     "ssh-public-key-path": pub,
-    "vultr-ssh-keys": pub,
+    [onceSsh.machineKeyKeys[String(opts["provider-compute"])]!]: pub,
   };
 }
 
@@ -57,8 +61,10 @@ export function ensureKey(opts: Opts, stateFn: StateFn, runFn?: Runner): Promise
   return onceSsh.ensureKey(opts, stateFn, runFn);
 }
 
-// Refuse a real create when the Vultr account holds a key named after the
-// profile that this deployment's state does not own.
+// Refuse a real create when the provider account holds a key named after the
+// profile that this deployment's state does not own. ONCE selects the REST API
+// and the token by provider: `do-token` on DigitalOcean, `vultr-api-key` on
+// Vultr.
 export function preflight(opts: Opts, fetchFn?: FetchFn): Promise<Opts> {
   return onceSsh.preflight(opts, fetchFn);
 }

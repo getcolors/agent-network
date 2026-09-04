@@ -10,7 +10,7 @@
             [clojure.test :refer [deftest is testing]]
             [io.github.getcolors.once.ssh :as once-ssh]
             [io.github.getcolors.agent-network.ssh :as ssh]
-            [io.github.getcolors.agent-network.validate-test :refer [fixture optout]]))
+            [io.github.getcolors.agent-network.validate-test :refer [fixture optout do-fixture do-optout]]))
 
 (defn- with-home
   "Run `f` with `~/.ssh` redirected into a fresh temporary home."
@@ -34,6 +34,19 @@
         (is (str/starts-with? (:ssh-public-key-path opts) ssh/build-placeholder-dir))
         (is (= (:ssh-public-key-path opts) (:vultr-ssh-keys opts)))
         (is (not (str/includes? (:ssh-private-key-path opts) (System/getProperty "user.home"))))))))
+
+(deftest build-placeholder-lands-on-the-selected-providers-key
+  ;; ONCE's table decides which desired-state key carries the machine key, so
+  ;; a second provider needs no second branch here.
+  (with-home
+    (fn [_]
+      (let [opts (ssh/with-machine-key (assoc (do-fixture) :green/event :build))]
+        (is (= (:ssh-public-key-path opts) (:digitalocean-ssh-keys opts)))
+        (is (not (contains? opts :vultr-ssh-keys)))
+        (is (str/starts-with? (:ssh-public-key-path opts) ssh/build-placeholder-dir)))
+      (let [opts (ssh/with-machine-key (assoc (do-optout) :green/event :build))]
+        (is (= "00000000" (:digitalocean-ssh-keys opts)))
+        (is (nil? (:ssh-public-key-path opts)))))))
 
 (deftest real-events-render-the-real-path
   (with-home
@@ -159,6 +172,19 @@
                      (preflight [{:id "abc" :name "agent-network-fixture" :public "ssh-ed25519 THEIRS"}]))]
         (is (= 1 (:green/exit opts)))
         (is (str/includes? (:green/err opts) "Do not delete it"))))))
+
+(deftest preflight-lists-keys-with-the-selected-providers-token
+  ;; ONCE selects the REST API and the token by provider; this proves the
+  ;; delegation hands each provider its own credential.
+  (with-home
+    (fn [_]
+      (let [seen (atom [])]
+        (with-redefs [once-ssh/fetch-account-keys (fn [provider token] (swap! seen conj [provider token]) [])]
+          (ssh/preflight! (ssh/with-machine-key (assoc (do-fixture) :green/event :create
+                                                       :do-token "do-secret" :vultr-api-key "wrong")))
+          (ssh/preflight! (ssh/with-machine-key (assoc (fixture) :green/event :create
+                                                       :vultr-api-key "vultr-secret" :do-token "wrong"))))
+        (is (= [["digitalocean" "do-secret"] ["vultr" "vultr-secret"]] @seen))))))
 
 (deftest preflight-failure-is-an-error-not-a-skip
   (with-home

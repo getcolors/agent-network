@@ -16,3 +16,11 @@ def fixture(overrides: dict | None = None) -> dict:
 
 def optout(overrides: dict | None = None) -> dict:
     return _load("optout.yml", overrides)
+
+
+def do_fixture(overrides: dict | None = None) -> dict:
+    return _load("colors-digitalocean.yml", overrides)
+
+
+def do_optout(overrides: dict | None = None) -> dict:
+    return _load("optout-digitalocean.yml", overrides)

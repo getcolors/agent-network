@@ -1,0 +1,14 @@
+{
+  "all" : {
+    "children" : {
+      "agent-network" : {
+        "hosts" : {
+          "agent-network-digitalocean-fixture" : {
+            "ansible_host" : "192.0.2.10",
+            "ansible_user" : "root"
+          }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,126 @@
+# DigitalOcean opt-out fixture for an agent-network deployment. Non-secret values
+# only. Credentials belong in the gitignored .envrc.private as COLORS_PAR_*
+# variables. Never export COLORS_PAR_PROFILE: it selects a deployment's remote
+# state.
+#
+# Required credentials:
+#   DigitalOcean    COLORS_PAR_DO_TOKEN
+#   Cloudflare      COLORS_PAR_CLOUDFLARE_API_TOKEN
+#   state in R2     COLORS_PAR_R2_ACCESS_KEY_ID
+#                   COLORS_PAR_R2_SECRET_ACCESS_KEY
+#   Anthropic       COLORS_PAR_ANTHROPIC_API_KEY
+#
+# Everything else this deployment holds is generated on the server and
+# supplied by nobody: the relay auth secret, the datastore encryption key, the
+# session cookie key, the proxy access token, the local admin password, the
+# durable automation token, and the agent's one-off setup key.
+
+profile: agent-network-digitalocean-optout
+workdir: WORKDIR
+
+provider-compute: digitalocean
+provider-dns: cloudflare
+provider-backend: local
+
+# Preserve this guard in committed desired state. Destruction requires an
+# explicitly authorized one-run override; never edit this flag to bypass it.
+compute-prevent-destroy: true
+
+# --- Agent Network -----------------------------------------------------------
+
+# One host carries the whole demo: the combined netbird-server, the dashboard
+# in agent-network-only mode, the reverse proxy in private mode, Traefik, and
+# the isolated agent container. The wildcard record beneath this host exists
+# for the generated agent-network endpoint.
+agent-network-host: agent-network.example.com
+
+agent-network-letsencrypt-email: admin@example.com
+
+# Owner of the local admin account, minted headlessly by POST /api/setup at
+# first convergence. Its password is generated on the host, create-once, and
+# surfaced by `agent-network-status` over SSH.
+agent-network-admin-email: admin@example.com
+agent-network-admin-name: Operator
+
+# Models the Anthropic provider claims, with the pricing used for cost
+# accounting. Two models so both denial classes are demonstrable at zero
+# upstream cost: the allowlist keeps only the first, so a request for the
+# second is denied by the guardrail while an unclaimed model is denied by
+# routing.
+agent-network-provider-models:
+  - id: claude-haiku-4-5-20251001
+    input-per-1k: 0.001
+    output-per-1k: 0.005
+    cache-read-per-1k: 0.0001
+    cache-creation-per-1k: 0.00125
+  - id: claude-sonnet-4-5-20250929
+    input-per-1k: 0.003
+    output-per-1k: 0.015
+    cache-read-per-1k: 0.0003
+    cache-creation-per-1k: 0.00375
+
+agent-network-allowed-models:
+  - claude-haiku-4-5-20251001
+
+# Cost ceilings, both desired state and both read back at acceptance.
+agent-network-policy-budget-usd-per-day: 2
+agent-network-policy-tokens-per-day: 2000000
+agent-network-global-budget-usd-per-day: 5
+agent-network-global-tokens-per-day: 5000000
+
+agent-network-log-retention-days: 7
+
+agent-network-stun-port: 3478
+agent-network-log-level: info
+
+# Two Docker networks: the gateway subnet has egress and carries the stack;
+# the agent subnet is internal and carries exactly Traefik, the reverse proxy,
+# and the agent.
+agent-network-gateway-subnet: 172.30.0.0/24
+agent-network-agent-subnet: 172.31.0.0/24
+
+# Container images, pinned by tag and digest: this package owns its templates
+# rather than running the upstream installer, so a silent retag upstream must
+# surface as a digest mismatch rather than a behaviour change.
+agent-network-server-image: netbirdio/netbird-server:0.77.1@sha256:e71f39cefcd90956d818dc4179084fd47d39f0741d1211b818ec640766b5794d
+agent-network-dashboard-image: netbirdio/dashboard:v2.91.1@sha256:f3eb26c93ca9901a7385e88e12f6ad98d04e075e8817c664d73557fea123875f
+agent-network-proxy-image: netbirdio/reverse-proxy:0.77.1@sha256:d3f5815133542c333e7e7166e19989adcce9afb15443a8de5ecbc87ef528c8f0
+agent-network-traefik-image: traefik:v3.7.11@sha256:5203c3f39ca70de6790d964624e042463ffbd57715bc82be155cf224c0dd5144
+
+# The agent image is built on the host from these pins.
+agent-network-agent-base-image: node:22-slim@sha256:83f487e0a63425e5b4d146fb5e5be574bcbe1b7b843d3ebafdd95eaf7767a7e5
+agent-network-claude-code-version: 2.1.246
+agent-network-netbird-client-version: 0.77.1
+
+# The DNS-01 client that issues the wildcard certificate at converge time;
+# exact version, checksum-verified from its GitHub release.
+agent-network-lego-version: 5.4.0
+
+# --- DigitalOcean --------------------------------------------------------------
+
+# digitalocean-name set to the profile: the override in its no-op form. The
+# droplet joins the region's default VPC, discovered at plan time;
+# digitalocean-vpc-uuid and digitalocean-vpc-cidr are refused.
+digitalocean-name: agent-network-digitalocean-optout
+digitalocean-region: ams3
+digitalocean-size: s-2vcpu-4gb
+digitalocean-image: ubuntu-24-04-x64
+
+digitalocean-ssh-sources:
+  - 0.0.0.0/0
+digitalocean-http-sources:
+  - 0.0.0.0/0
+# STUN, the only UDP published. The WireGuard leg between the agent and the
+# proxy never leaves the host's agent subnet, so no WireGuard port is
+# published.
+digitalocean-stun-sources:
+  - 0.0.0.0/0
+
+# --- R2 state backend ---------------------------------------------------------
+
+r2-bucket: tofu-state-example
+r2-endpoint: https://example.eu.r2.cloudflarestorage.com
+
+# Opt-out mode: an explicit account key id. The package touches no key material
+# at all and the compute template must render the historical shape.
+digitalocean-ssh-keys: "00000000"

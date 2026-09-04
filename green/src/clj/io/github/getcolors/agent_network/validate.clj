@@ -8,13 +8,52 @@
 
 (def profile-par (green-cli/par-name :profile))
 
-(def required
-  "Every key desired state must carry.
+(def compute-providers
+  "provider-compute -> what that choice implies.
 
-  Two deliberate absences. `vultr-ssh-keys` selects opt-out mode by being
+  `:required` are the non-secret keys that provider's template interpolates,
+  `:secrets` the credentials it needs through COLORS_PAR_*, and `:tofu-env` the
+  subset OpenTofu reads from the process environment itself. Keeping the three
+  together is what stops a provider being validated against one set of keys and
+  run with another — a stage exporting a credential nobody checked for, or a
+  check demanding a key no template uses. The keys of this map are the
+  advertised providers; a provider without a template directory and a golden
+  is not advertised.
+
+  Three source lists rather than the standard's two, because this package
+  publishes STUN over UDP beside 22/80/443 and the firewall on every provider
+  mirrors that rule.
+
+  Two keys the templates read are deliberately not required. `<provider>-name`
+  is an optional override of the profile (Compute Name Standard), and
+  `<provider>-ssh-keys` is meaningful by its absence (SSH Keypair Standard).
+  Keys of the unselected provider are accepted and ignored, so one colors.yml
+  stays portable between providers."
+  {"digitalocean"
+   {:required [:digitalocean-region :digitalocean-size :digitalocean-image
+               :digitalocean-ssh-sources :digitalocean-http-sources
+               :digitalocean-stun-sources]
+    :secrets [:do-token]
+    :tofu-env {:do-token "DIGITALOCEAN_TOKEN"}}
+   "vultr"
+   {:required [:vultr-region :vultr-plan :vultr-os-id
+               :vultr-ssh-sources :vultr-http-sources :vultr-stun-sources]
+    :secrets [:vultr-api-key]
+    :tofu-env {:vultr-api-key "VULTR_API_KEY"}}})
+
+(def default-compute-provider
+  "The provider a deployment created before this package recorded one in its
+  compute output must be running: the only one it ever offered."
+  "vultr")
+
+(def required
+  "Every key desired state must carry whichever provider is selected. The
+  provider-scoped keys come from `compute-providers`.
+
+  Two deliberate absences. `<provider>-ssh-keys` selects opt-out mode by being
   present, so requiring it would make every conforming keygen deployment
-  invalid. `vultr-name` is the Compute Name Standard's optional override: a
-  fresh colors.yml that omits it is complete and names the machine after the
+  invalid. `<provider>-name` is the Compute Name Standard's optional override:
+  a fresh colors.yml that omits it is complete and names the machine after the
   profile. There is likewise no `package` key — §5 removes a key that can hold
   exactly one value."
   [:profile :workdir :provider-compute :provider-dns :provider-backend
@@ -32,8 +71,6 @@
    :agent-network-agent-base-image
    :agent-network-claude-code-version :agent-network-netbird-client-version
    :agent-network-lego-version
-   :vultr-region :vultr-plan :vultr-os-id
-   :vultr-ssh-sources :vultr-http-sources :vultr-stun-sources
    :r2-bucket :r2-endpoint])
 
 (def image-keys
@@ -53,8 +90,14 @@
 (def cidr-re #"^(?:\d{1,3}\.){3}\d{1,3}/\d{1,2}$")
 (def version-re #"^[0-9]+\.[0-9]+\.[0-9]+$")
 (def model-id-re #"^[A-Za-z0-9][A-Za-z0-9._:-]*$")
-;; Vultr labels accept letters, digits, dashes, underscores and periods.
-(def vultr-name-re #"^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$")
+(def name-rules
+  "What each provider accepts as a machine name, checked here rather than
+  discovered mid-apply. DigitalOcean droplet names are hostname-like; Vultr
+  labels are free-form console text, held to a safe subset."
+  {"digitalocean" {:re #"^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$"
+                   :message "must be a hostname-like name: lowercase letters, digits, dots and hyphens, 1-63 characters"}
+   "vultr" {:re #"^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$"
+            :message "must be a safe 1-63 character name"}})
 
 (defn missing? [x] (or (nil? x) (and (string? x) (str/blank? x))))
 
@@ -64,12 +107,21 @@
   [v]
   (or (missing? v) (= "REPLACE_ME" (str/trim (str v)))))
 
+(defn compute-provider [opts] (get compute-providers (:provider-compute opts)))
+
+(defn compute-key
+  "Desired state names compute keys after the provider, so the shared steps
+  reach them through the selected provider rather than a fixed prefix."
+  [opts suffix]
+  (keyword (str (:provider-compute opts) "-" suffix)))
+
 (defn compute-name
   "What this deployment calls its machine. The one function that answers it —
   every label, including the firewall's, derives from this and never from the
-  raw override key or a second copy of the profile (§3)."
+  raw override key or a second copy of the profile (§3). The override is read
+  from the selected provider's `<provider>-name` alone."
   [opts]
-  (let [override (:vultr-name opts)]
+  (let [override (get opts (compute-key opts "name"))]
     (if (placeholder? override) (str (:profile opts)) (str/trim (str override)))))
 
 (defn keygen?
@@ -173,6 +225,113 @@
                 (every? #(contains? (set allowed) (str (:id %))) models))
        [":agent-network-provider-models must claim at least one model outside :agent-network-allowed-models"]))))
 
+(defn cidrs
+  "A source list as desired state or an overlay string carries it: a YAML
+  list, or one string of comma- or space-separated entries."
+  [opts k]
+  (let [v (get opts k) xs (if (sequential? v) v (str/split (str v) #"[,\s]+"))]
+    (->> xs (map (comp str/trim str)) (remove str/blank?) vec)))
+
+;; Syntactic CIDR checks, the same in every colour and deliberately not a
+;; resolver: an address library that accepts a hostname would let a firewall
+;; source depend on DNS at apply time.
+(def ^:private ipv4-re
+  #"^(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(?:\.(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}$")
+(def ^:private hex-group-re #"^[0-9A-Fa-f]{1,4}$")
+
+(defn- fold-ipv4-tail
+  "An IPv4-embedded address (`::ffff:192.0.2.1`, `64:ff9b::192.0.2.33`)
+  carries a dotted quad in last position only. It stands for two 16-bit
+  groups, so it is checked as IPv4 and folded into two zero groups before the
+  group arithmetic; nil when the tail is dotted but not an IPv4 address. A
+  dotted quad anywhere else falls through to the hex-group check and fails
+  there."
+  [s]
+  (let [i (str/last-index-of s ":")
+        tail (if i (subs s (inc i)) s)]
+    (cond
+      (not (str/includes? tail ".")) s
+      (and i (re-matches ipv4-re tail)) (str (subs s 0 (inc i)) "0:0")
+      :else nil)))
+
+(defn- ipv6-address? [raw]
+  (when-let [s (fold-ipv4-tail raw)]
+    (let [groups (fn [part] (if (str/blank? part) [] (str/split part #":" -1)))]
+      (if (str/includes? s "::")
+        (let [halves (str/split s #"::" -1)]
+          (and (= 2 (count halves))
+               (let [gs (mapcat groups halves)]
+                 (and (<= (count gs) 7) (every? #(re-matches hex-group-re %) gs)))))
+        (let [gs (groups s)]
+          (and (= 8 (count gs)) (every? #(re-matches hex-group-re %) gs)))))))
+
+(defn cidr?
+  "Whether `s` is a syntactically valid IPv4 or IPv6 CIDR: an address, a
+  slash, and a prefix length the address family allows."
+  [s]
+  (let [[address prefix & more] (str/split (str s) #"/" -1)]
+    (and (nil? more) (some? prefix) (re-matches #"^\d{1,3}$" prefix)
+         (let [n (Long/parseLong prefix)]
+           (cond
+             (re-matches ipv4-re address) (<= 0 n 32)
+             (ipv6-address? address) (<= 0 n 128)
+             :else false)))))
+
+(defn source-errors
+  "The network contract: the selected provider's SSH sources must name at
+  least one CIDR — a machine nobody can reach is not a deployment — and every
+  entry of all three lists must be one. An empty HTTP list is allowed and
+  means no public HTTP; an empty STUN list means no public STUN. Refusing
+  beats defaulting: a silent default-open in front of a control plane is worse
+  than a validation error."
+  [opts]
+  (let [ssh-key (compute-key opts "ssh-sources")
+        http-key (compute-key opts "http-sources")
+        stun-key (compute-key opts "stun-sources")]
+    (concat
+     (when (and (not (missing? (get opts ssh-key))) (empty? (cidrs opts ssh-key)))
+       [(str ssh-key " must list at least one CIDR")])
+     (for [k [ssh-key http-key stun-key]
+           :when (not (missing? (get opts k)))
+           entry (cidrs opts k)
+           :when (not (cidr? entry))]
+       (str k " entry " (pr-str entry) " is not an IPv4 or IPv6 CIDR")))))
+
+(defn provider-errors
+  "Checks that hold only for the selected provider. Keys of the other provider
+  are ignored, never refused. The *resolved* machine name is validated against
+  the provider's rules rather than passed through unread (Compute Name
+  Standard §2): an override is checked as itself, and a profile that falls
+  through as the name is checked too, because a profile Vultr accepts as a
+  label can be a droplet name DigitalOcean refuses mid-apply. The error names
+  the key the value came from. A blank resolved value is skipped, so a missing
+  profile reports `is required` alone."
+  [opts]
+  (let [name-key (compute-key opts "name")
+        {:keys [re message]} (get name-rules (:provider-compute opts))
+        override? (not (placeholder? (get opts name-key)))
+        name (compute-name opts)
+        source (if override?
+                 (str name-key)
+                 (str ":profile (the " (:provider-compute opts) " machine name)"))]
+    (concat
+     (when (and re (not (str/blank? name))
+                (or (> (count name) 63) (not (re-matches re name))))
+       [(str source " " message)])
+     (case (:provider-compute opts)
+       "vultr"
+       (when-not (or (missing? (:vultr-os-id opts)) (integer? (:vultr-os-id opts)))
+         [":vultr-os-id must be Vultr's numeric operating-system id"])
+       "digitalocean"
+       (concat
+        ;; No VPC is created: the region's default is discovered at plan time,
+        ;; and a pinned UUID or a CIDR would make this package start owning one.
+        (when (contains? opts :digitalocean-vpc-uuid)
+          [":digitalocean-vpc-uuid must be absent; the default regional VPC is discovered at runtime"])
+        (when (contains? opts :digitalocean-vpc-cidr)
+          [":digitalocean-vpc-cidr must be absent; this package must not create a VPC"]))
+       nil))))
+
 (defn env-errors [env]
   (when (not-empty (str (get env profile-par)))
     [(str profile-par " is set; profile must come from colors.yml only")]))
@@ -180,9 +339,12 @@
 (defn state-errors [opts]
   (vec
    (concat
-    (for [k required :when (missing? (get opts k))] (str k " is required"))
-    (when-not (= "vultr" (:provider-compute opts))
-      [":provider-compute must be vultr"])
+    (for [k (concat required (:required (compute-provider opts)))
+          :when (missing? (get opts k))]
+      (str k " is required"))
+    (when-not (compute-provider opts)
+      [(str ":provider-compute must be one of "
+            (str/join ", " (sort (keys compute-providers))))])
     (when-not (= "cloudflare" (:provider-dns opts))
       [":provider-dns must be cloudflare"])
     (when-not (contains? #{"local" "s3" "r2"} (:provider-backend opts))
@@ -262,21 +424,45 @@
     (when (seq (remove missing? [(:agent-network-provider-models opts)
                                  (:agent-network-allowed-models opts)]))
       (model-errors opts))
-    (when-not (or (missing? (:vultr-os-id opts)) (integer? (:vultr-os-id opts)))
-      [":vultr-os-id must be Vultr's numeric operating-system id"])
-    ;; The override is validated against the provider's rules rather than
-    ;; passed through unread (Compute Name Standard §2).
-    (when-not (or (placeholder? (:vultr-name opts))
-                  (re-matches vultr-name-re (str/trim (str (:vultr-name opts)))))
-      [":vultr-name must be letters, digits, dot, dash or underscore"]))))
+    (when (compute-provider opts)
+      (concat (provider-errors opts) (source-errors opts))))))
+
+(defn provider-state-errors
+  "Provider switching is a rebuild, never an apply. Every provider shares one
+  state key, so a changed provider-compute on a profile whose state already
+  holds compute would plan a cross-provider replacement — and a delete would
+  render and destroy the *selected* provider's template against the wrong
+  lifecycle. `params` is the compute stage's recorded output, or nil when the
+  state holds none; its `provider` is the registry name the template that
+  produced it belongs to. A recorded output without one predates this package
+  recording it, which makes it the default provider's."
+  [opts params]
+  (let [selected (:provider-compute opts)
+        recorded (some-> (:provider params) str not-empty)]
+    (cond
+      (nil? params) nil
+
+      (and recorded (not= recorded selected))
+      [(str "state holds a " recorded " machine; set provider-compute back to "
+            recorded " and delete first")]
+
+      (and (nil? recorded) (not= selected default-compute-provider))
+      [(str "state holds a machine with no recorded provider, created before this "
+            "package recorded one, which makes it a " default-compute-provider
+            " machine; set provider-compute back to " default-compute-provider
+            " and delete first")]
+
+      :else nil)))
 
 (defn backend-secrets [opts]
   (:secrets (get-in once-validate/providers
                     [:provider-backend (:provider-backend opts)])))
 
-(def provider-secrets
-  "What talking to the providers needs, on any real event."
-  [:vultr-api-key :cloudflare-api-token])
+(defn provider-secrets
+  "What talking to the providers needs, on any real event: the selected
+  compute provider's credential and Cloudflare's."
+  [opts]
+  (concat (:secrets (compute-provider opts)) [:cloudflare-api-token]))
 
 (def application-secrets
   "What converging the machine needs, and therefore only a create.
@@ -296,7 +482,7 @@
   nothing worth a final archive, and demanding the Anthropic key to destroy a
   machine would just be a lock on the exit."
   [opts event]
-  (let [keys (concat provider-secrets
+  (let [keys (concat (provider-secrets opts)
                      (case event
                        :create application-secrets
                        [])
@@ -306,7 +492,7 @@
 
 (defn tofu-env [opts slot]
   (case slot
-    :provider-compute {:vultr-api-key "VULTR_API_KEY"}
+    :provider-compute (:tofu-env (compute-provider opts) {})
     :provider-dns {:cloudflare-api-token "CLOUDFLARE_API_TOKEN"}
     :provider-backend (:tofu-env (get-in once-validate/providers
                                          [:provider-backend (:provider-backend opts)]) {})

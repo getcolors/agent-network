@@ -24,9 +24,10 @@
 (defn spec [source target data] {:template source :target target :data data :opts template-opts})
 (defn raw-spec [target content] (sc/content-spec target content))
 
-(defn cidrs [opts k]
-  (let [v (get opts k) xs (if (sequential? v) v (str/split (str v) #"[,\s]+"))]
-    (->> xs (map (comp str/trim str)) (remove str/blank?) vec)))
+(def cidrs
+  "The source lists as validate parses them, so the template and the
+  validator can never disagree about what an entry is."
+  validate/cidrs)
 
 (defn credential-env [opts & slots]
   (not-empty
@@ -35,24 +36,52 @@
          (apply merge (map #(validate/tofu-env opts %) (conj (vec slots) :provider-backend))))))
 (defn backend-credential-env [opts] (credential-env opts))
 
-(defn fallback-params [opts]
-  {:ip "192.0.2.10" :user "root" :sudoer "root" :name (validate/compute-name opts)})
+(defn fallback-params
+  "What `build` and `--dry-run` render in place of a compute output: the
+  documentation address, shaped like the selected provider's real `params` so
+  every later stage sees the same keys either way."
+  [opts]
+  {:provider (:provider-compute opts) :ip "192.0.2.10" :user "root" :sudoer "root"
+   :name (validate/compute-name opts)})
 (defn output-params [result]
   (some-> (get-in result [:tofu/outputs :params]) walk/keywordize-keys))
 
+(defn resolved-compute
+  "Refuse to hand 192.0.2.10 to Ansible. That is the documentation address the
+  credential-free build and dry-run paths render with; on a real converge a
+  missing compute output must fail loudly rather than quietly point the whole
+  playbook — and the DNS records — at TEST-NET."
+  [result fallback outputs]
+  (if (:ip outputs)
+    (merge result fallback outputs)
+    (assoc result :green/exit 1
+           :green/err (str "compute produced no ip output; refusing to converge "
+                           "against the documentation address"))))
+
 ;; ---------------------------------------------------------------- compute
 
-(defn infrastructure-data [opts]
+(defn infrastructure-data
+  "Template values for the compute stage. The name and the three source lists
+  are resolved here once, so a template interpolates values and never branches
+  on which provider it belongs to."
+  [opts]
   (assoc opts
          :ssh-keygen (validate/keygen? opts)
          :compute-name (validate/compute-name opts)
-         :ssh-sources-hcl (tofu/hcl-list (cidrs opts :vultr-ssh-sources))
-         :http-sources-hcl (tofu/hcl-list (cidrs opts :vultr-http-sources))
-         :stun-sources-hcl (tofu/hcl-list (cidrs opts :vultr-stun-sources))))
+         :ssh-sources-hcl (tofu/hcl-list (cidrs opts (validate/compute-key opts "ssh-sources")))
+         :http-sources-hcl (tofu/hcl-list (cidrs opts (validate/compute-key opts "http-sources")))
+         :stun-sources-hcl (tofu/hcl-list (cidrs opts (validate/compute-key opts "stun-sources")))))
+
+(defn infrastructure-template
+  "Providers are selected by template directory, `infrastructure/<provider>/`,
+  not by conditionals inside one file; the rendered target is the same
+  `main.tf` whichever directory it came from."
+  [opts]
+  (template (str "infrastructure." (:provider-compute opts)) "main.tf"))
 
 (defn infrastructure-step [opts]
   (let [dir (tool-dir opts infrastructure-tool)
-        specs [(spec (template "infrastructure" "main.tf") (str dir "/main.tf")
+        specs [(spec (infrastructure-template opts) (str dir "/main.tf")
                      (infrastructure-data opts))]
         result (tofu/tofu-with-spec opts specs
                                     {:dir dir :env (credential-env opts :provider-compute)})]
@@ -60,7 +89,7 @@
       (wf/failed? result) result
       (= :build (:green/event opts)) (merge result (fallback-params opts))
       (= :delete (:green/event opts)) result
-      :else (merge result (fallback-params opts) (output-params result)))))
+      :else (resolved-compute result (fallback-params opts) (output-params result)))))
 
 ;; -------------------------------------------------------------------- dns
 

@@ -2,9 +2,11 @@
   "The deployment's machine keypair, per the workspace SSH Keypair Standard.
 
   The behaviour itself is ONCE's (`io.github.getcolors.once.ssh`): keygen mode
-  when desired state carries no `vultr-ssh-keys`, an ed25519 key named after
-  the profile in `~/.ssh`, the create matrix, the Vultr REST preflight, and a
-  cleanup that runs only after a successful destroy. Reusing it rather than
+  when desired state carries no `<provider>-ssh-keys` for the selected compute
+  provider, an ed25519 key named after the profile in `~/.ssh`, the create
+  matrix, the provider REST preflight (DigitalOcean and Vultr, each with its
+  own token), and a cleanup that runs only after a successful destroy. Reusing
+  it rather than
   reimplementing means one standard has one implementation, and a fix upstream
   reaches this package when the pin moves.
 
@@ -34,7 +36,10 @@
 
 (defn with-machine-key
   "Fill the template values keygen mode owns. Opt-out opts pass through
-  untouched, byte-for-byte as before the standard."
+  untouched, byte-for-byte as before the standard. The placeholder public-key
+  path lands on whichever key the selected provider takes the machine key
+  through — ONCE's table, not a literal, so a second provider needs no second
+  branch here."
   [opts]
   (if-not (validate/keygen? opts)
     opts
@@ -48,7 +53,7 @@
           (assoc opts
                  :ssh-private-key-path prv
                  :ssh-public-key-path pub
-                 :vultr-ssh-keys pub))))))
+                 (once-ssh/machine-key-keys (:provider-compute opts)) pub))))))
 
 (defn ensure-key!
   "The standard's create matrix and key generation, on a real create."
@@ -56,8 +61,10 @@
   (once-ssh/ensure-key! opts state-fn))
 
 (defn preflight!
-  "Refuse a real create when the Vultr account holds a key named after the
-  profile that this deployment's state does not own."
+  "Refuse a real create when the provider account holds a key named after the
+  profile that this deployment's state does not own. ONCE selects the REST API
+  and the token by provider: `:do-token` on DigitalOcean, `:vultr-api-key` on
+  Vultr."
   [opts]
   (once-ssh/preflight! opts))
 

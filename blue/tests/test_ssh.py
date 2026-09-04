@@ -10,7 +10,7 @@ import stat
 from pathlib import Path
 
 import pytest
-from conftest import fixture, optout
+from conftest import do_fixture, do_optout, fixture, optout
 from package_agent_network_blue import ssh
 
 
@@ -45,6 +45,18 @@ def test_build_renders_a_stable_placeholder_path(home):
     assert opts["ssh-public-key-path"].startswith(ssh.build_placeholder_dir)
     assert opts["ssh-public-key-path"] == opts["vultr-ssh-keys"]
     assert str(home) not in opts["ssh-private-key-path"]
+
+
+def test_build_placeholder_lands_on_the_selected_providers_key(home):
+    # ONCE's table decides which desired-state key carries the machine key,
+    # so a second provider needs no second branch here.
+    opts = ssh.with_machine_key({**do_fixture(), "blue/event": "build"})
+    assert opts["digitalocean-ssh-keys"] == opts["ssh-public-key-path"]
+    assert "vultr-ssh-keys" not in opts
+    assert opts["ssh-public-key-path"].startswith(ssh.build_placeholder_dir)
+    opted_out = ssh.with_machine_key({**do_optout(), "blue/event": "build"})
+    assert opted_out["digitalocean-ssh-keys"] == "00000000"
+    assert opted_out.get("ssh-public-key-path") is None
 
 
 def test_real_events_render_the_real_path(home):
@@ -158,6 +170,21 @@ def test_preflight_refuses_a_foreign_key_and_says_do_not_delete_it(home):
                      [{"id": "abc", "name": "agent-network-fixture", "public": "ssh-ed25519 THEIRS"}])
     assert opts["blue/exit"] == 1
     assert "Do not delete it" in opts["blue/err"]
+
+
+def test_preflight_lists_keys_with_the_selected_providers_token(home):
+    # ONCE selects the REST API and the token by provider; this proves the
+    # delegation hands each provider its own credential.
+    seen = []
+
+    def capture(provider, token):
+        seen.append((provider, token))
+        return []
+    ssh.preflight(ssh.with_machine_key({**do_fixture(), "blue/event": "create",
+                                        "do-token": "do-secret", "vultr-api-key": "wrong"}), capture)
+    ssh.preflight(ssh.with_machine_key({**fixture(), "blue/event": "create",
+                                        "vultr-api-key": "vultr-secret", "do-token": "wrong"}), capture)
+    assert seen == [("digitalocean", "do-secret"), ("vultr", "vultr-secret")]
 
 
 def test_preflight_failure_is_an_error_not_a_skip(home):

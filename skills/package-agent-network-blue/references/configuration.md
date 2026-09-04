@@ -15,7 +15,7 @@ is set.
 |---|---|
 | `profile` | This deployment's identity. Keys remote state as `<profile>/<stage>.tfstate`, names the machine, its firewall, the SSH keypair and the `~/.ssh/config` alias. |
 | `workdir` | Where generated output lands. Conventionally `.colors`. |
-| `provider-compute` | Must be `vultr`. |
+| `provider-compute` | `vultr` or `digitalocean`. Selects the compute template and which provider-scoped keys below are read; the other provider's keys are ignored. Switching on a profile that already holds a machine is refused — see below. |
 | `provider-dns` | Must be `cloudflare`. |
 | `provider-backend` | `local`, `s3` or `r2`. |
 | `compute-prevent-destroy` | Keep `true` in committed state. Destruction needs `COLORS_PAR_COMPUTE_PREVENT_DESTROY=false` for one run. |
@@ -59,14 +59,54 @@ certificate at converge time. Both downloads are verified against their
 release checksums. Move the server image, proxy image and client version
 together — one release train.
 
-## Vultr
+## Vultr (`provider-compute: vultr`)
 
 | Key | Meaning |
 |---|---|
-| `vultr-region`, `vultr-plan`, `vultr-os-id` | Instance shape. |
-| `vultr-name` | Optional. Absent, blank or `REPLACE_ME` means the machine is named after the profile (Compute Name Standard). |
+| `vultr-region`, `vultr-plan`, `vultr-os-id` | Instance shape. `vultr-os-id` is numeric; 2284 is Ubuntu 24.04 LTS x64. |
+| `vultr-name` | Optional. Absent, blank or `REPLACE_ME` means the machine is named after the profile (Compute Name Standard). Letters, digits, `.`, `_`, `-`, 1-63 characters; updates in place and is never a hostname. |
 | `vultr-ssh-keys` | Optional. Absent selects keygen mode (the package owns `~/.ssh/<profile>`); present is an explicit account key id and the package touches no key material. |
 | `vultr-ssh-sources`, `vultr-http-sources`, `vultr-stun-sources` | Source CIDRs for 22/tcp, 80+443/tcp, and STUN udp. No WireGuard port is published: the only peer is on the internal Docker network. |
+
+## DigitalOcean (`provider-compute: digitalocean`)
+
+| Key | Meaning |
+|---|---|
+| `digitalocean-region`, `digitalocean-size`, `digitalocean-image` | Droplet shape. `region` and `image` are ForceNew; `size` resizes in place. `ubuntu-24-04-x64` is the image slug the package was built for. |
+| `digitalocean-name` | Optional. Absent, blank or `REPLACE_ME` means the droplet is named after the profile. Hostname-like (lowercase letters, digits, dots, hyphens; 1-63 characters), checked before any provider call. Renames in place, but the guest hostname cloud-init set at creation lags until a rebuild. |
+| `digitalocean-ssh-keys` | Optional. Absent selects keygen mode; present is an existing account key id or fingerprint and the package touches no key material. |
+| `digitalocean-ssh-sources`, `digitalocean-http-sources`, `digitalocean-stun-sources` | Source CIDRs for 22/tcp, 80+443/tcp, and STUN udp — the same rule set as on Vultr. |
+
+The droplet joins the region's default VPC (`default-<region>`), discovered at
+plan time. `digitalocean-vpc-uuid` and `digitalocean-vpc-cidr` are refused:
+this package neither pins nor creates a VPC.
+
+## The firewall sources
+
+The provider firewall is the load-bearing layer on both providers — inbound
+22 from `<provider>-ssh-sources`, 80 and 443 from `<provider>-http-sources`,
+STUN over UDP from `<provider>-stun-sources`, nothing else; Ansible manages
+no host firewall for these ports (the DOCKER-USER rules it does install are
+the agent's isolation boundary, not port management). Every entry must be a
+syntactically valid IPv4 or IPv6 CIDR and the SSH list must not be empty,
+both checked before any provider call. An empty HTTP or STUN list is allowed
+and means that service is not public.
+
+## Switching providers
+
+Provider switching is a rebuild, never an apply. Both providers share one
+state key, so a changed `provider-compute` on a profile whose state already
+holds a machine is refused on create *and* delete with
+`state holds a <recorded> machine; set provider-compute back to <recorded> and
+delete first`. A deployment created before this package recorded the provider
+in its compute output is treated as Vultr. The check reads the state with the
+backend credentials alone and runs before the provider credential check, so a
+mistaken edit reports the actionable error rather than a missing token. On a
+real delete an unreadable backend is an error (`could not read the
+infrastructure state for the delete cleanup`), never an empty state; on a
+real create a compute stage that applied without an address is refused
+(`compute produced no ip output`) rather than converged against the
+documentation address.
 
 ## State backend
 
@@ -78,7 +118,8 @@ together — one release train.
 
 | Variable | Purpose |
 |---|---|
-| `COLORS_PAR_VULTR_API_KEY` | Compute. |
+| `COLORS_PAR_VULTR_API_KEY` | Compute, with `provider-compute: vultr`. |
+| `COLORS_PAR_DO_TOKEN` | Compute, with `provider-compute: digitalocean`. Only the selected provider's credential is required; the other is ignored. |
 | `COLORS_PAR_CLOUDFLARE_API_TOKEN` | Record edits only: the A records, and the DNS-01 TXT records lego uses to issue the wildcard certificate at converge time. |
 | `COLORS_PAR_R2_ACCESS_KEY_ID`, `COLORS_PAR_R2_SECRET_ACCESS_KEY` | State backend. |
 | `COLORS_PAR_ANTHROPIC_API_KEY` | Handed to NetBird's encrypted store at converge; the agent never sees it. A deliberately fake value is a supported demo mode (acceptance then expects the relayed upstream 401). |

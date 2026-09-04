@@ -5,12 +5,59 @@ import { onceSsh } from "./once.ts";
 
 export const profilePar = parName("profile");
 
-// Every key desired state must carry.
+interface ProviderEntry {
+  required: string[];
+  secrets: string[];
+  tofuEnv: Record<string, string>;
+}
+
+// provider-compute -> what that choice implies.
 //
-// Two deliberate absences. `vultr-ssh-keys` selects opt-out mode by being
+// `required` are the non-secret keys that provider's template interpolates,
+// `secrets` the credentials it needs through COLORS_PAR_*, and `tofuEnv` the
+// subset OpenTofu reads from the process environment itself. Keeping the three
+// together is what stops a provider being validated against one set of keys and
+// run with another — a stage exporting a credential nobody checked for, or a
+// check demanding a key no template uses. The keys of this map are the
+// advertised providers; a provider without a template directory and a golden
+// is not advertised.
+//
+// Three source lists rather than the standard's two, because this package
+// publishes STUN over UDP beside 22/80/443 and the firewall on every provider
+// mirrors that rule.
+//
+// Two keys the templates read are deliberately not required. `<provider>-name`
+// is an optional override of the profile (Compute Name Standard), and
+// `<provider>-ssh-keys` is meaningful by its absence (SSH Keypair Standard).
+// Keys of the unselected provider are accepted and ignored, so one colors.yml
+// stays portable between providers.
+export const computeProviders: Record<string, ProviderEntry> = {
+  digitalocean: {
+    required: ["digitalocean-region", "digitalocean-size", "digitalocean-image",
+               "digitalocean-ssh-sources", "digitalocean-http-sources",
+               "digitalocean-stun-sources"],
+    secrets: ["do-token"],
+    tofuEnv: { "do-token": "DIGITALOCEAN_TOKEN" },
+  },
+  vultr: {
+    required: ["vultr-region", "vultr-plan", "vultr-os-id",
+               "vultr-ssh-sources", "vultr-http-sources", "vultr-stun-sources"],
+    secrets: ["vultr-api-key"],
+    tofuEnv: { "vultr-api-key": "VULTR_API_KEY" },
+  },
+};
+
+// The provider a deployment created before this package recorded one in its
+// compute output must be running: the only one it ever offered.
+export const defaultComputeProvider = "vultr";
+
+// Every key desired state must carry whichever provider is selected. The
+// provider-scoped keys come from `computeProviders`.
+//
+// Two deliberate absences. `<provider>-ssh-keys` selects opt-out mode by being
 // present, so requiring it would make every conforming keygen deployment
-// invalid. `vultr-name` is the Compute Name Standard's optional override: a
-// fresh colors.yml that omits it is complete and names the machine after the
+// invalid. `<provider>-name` is the Compute Name Standard's optional override:
+// a fresh colors.yml that omits it is complete and names the machine after the
 // profile. There is likewise no `package` key — §5 removes a key that can hold
 // exactly one value.
 export const required = [
@@ -29,8 +76,6 @@ export const required = [
   "agent-network-agent-base-image",
   "agent-network-claude-code-version", "agent-network-netbird-client-version",
   "agent-network-lego-version",
-  "vultr-region", "vultr-plan", "vultr-os-id",
-  "vultr-ssh-sources", "vultr-http-sources", "vultr-stun-sources",
   "r2-bucket", "r2-endpoint",
 ];
 
@@ -51,8 +96,19 @@ const imagePinnedRe = /^[^\s@]+(?::[^\s:@]+@sha256:[0-9a-f]{64}|:[^\s:@]+|@sha25
 const cidrRe = /^(?:\d{1,3}\.){3}\d{1,3}\/\d{1,2}$/;
 const versionRe = /^[0-9]+\.[0-9]+\.[0-9]+$/;
 const modelIdRe = /^[A-Za-z0-9][A-Za-z0-9._:-]*$/;
-// Vultr labels accept letters, digits, dashes, underscores and periods.
-const vultrNameRe = /^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$/;
+// What each provider accepts as a machine name, checked here rather than
+// discovered mid-apply. DigitalOcean droplet names are hostname-like; Vultr
+// labels are free-form console text, held to a safe subset.
+const nameRules: Record<string, { re: RegExp; message: string }> = {
+  digitalocean: {
+    re: /^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$/,
+    message: "must be a hostname-like name: lowercase letters, digits, dots and hyphens, 1-63 characters",
+  },
+  vultr: {
+    re: /^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$/,
+    message: "must be a safe 1-63 character name",
+  },
+};
 
 export function missing(value: unknown): boolean {
   return value === null || value === undefined ||
@@ -65,11 +121,22 @@ export function placeholder(value: unknown): boolean {
   return missing(value) || String(value).trim() === "REPLACE_ME";
 }
 
+export function computeProvider(opts: Opts): ProviderEntry | undefined {
+  return computeProviders[String(opts["provider-compute"])];
+}
+
+// Desired state names compute keys after the provider, so the shared steps
+// reach them through the selected provider rather than a fixed prefix.
+export function computeKey(opts: Opts, suffix: string): string {
+  return `${opts["provider-compute"]}-${suffix}`;
+}
+
 // What this deployment calls its machine. The one function that answers it —
 // every label, including the firewall's, derives from this and never from the
-// raw override key or a second copy of the profile (§3).
+// raw override key or a second copy of the profile (§3). The override is read
+// from the selected provider's `<provider>-name` alone.
 export function computeName(opts: Opts): string {
-  const override = opts["vultr-name"];
+  const override = opts[computeKey(opts, "name")];
   return placeholder(override)
     ? String(opts.profile ?? "")
     : String(override).trim();
@@ -201,6 +268,123 @@ export function modelErrors(opts: Opts): string[] {
   return errors;
 }
 
+// A source list as desired state or an overlay string carries it: a YAML
+// list, or one string of comma- or space-separated entries.
+export function cidrs(opts: Opts, key: string): string[] {
+  const value = opts[key];
+  const parts = Array.isArray(value) ? value : String(value ?? "").split(/[,\s]+/);
+  return parts.map((part) => String(part).trim()).filter((part) => part.length > 0);
+}
+
+// Syntactic CIDR checks, the same in every colour and deliberately not a
+// resolver: an address library that accepts a hostname would let a firewall
+// source depend on DNS at apply time.
+const ipv4Re = /^(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(?:\.(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}$/;
+const hexGroupRe = /^[0-9A-Fa-f]{1,4}$/;
+
+// An IPv4-embedded address (`::ffff:192.0.2.1`, `64:ff9b::192.0.2.33`) carries
+// a dotted quad in last position only. It stands for two 16-bit groups, so it
+// is checked as IPv4 and folded into two zero groups before the group
+// arithmetic; undefined when the tail is dotted but not an IPv4 address. A
+// dotted quad anywhere else falls through to the hex-group check and fails.
+function foldIpv4Tail(s: string): string | undefined {
+  const i = s.lastIndexOf(":");
+  const tail = i >= 0 ? s.slice(i + 1) : s;
+  if (!tail.includes(".")) return s;
+  if (i >= 0 && ipv4Re.test(tail)) return `${s.slice(0, i + 1)}0:0`;
+  return undefined;
+}
+
+function ipv6Address(raw: string): boolean {
+  const s = foldIpv4Tail(raw);
+  if (s === undefined) return false;
+  const groups = (part: string) => (part.trim() === "" ? [] : part.split(":"));
+  if (s.includes("::")) {
+    const halves = s.split("::");
+    if (halves.length !== 2) return false;
+    const gs = halves.flatMap(groups);
+    return gs.length <= 7 && gs.every((g) => hexGroupRe.test(g));
+  }
+  const gs = groups(s);
+  return gs.length === 8 && gs.every((g) => hexGroupRe.test(g));
+}
+
+// Whether `s` is a syntactically valid IPv4 or IPv6 CIDR: an address, a
+// slash, and a prefix length the address family allows.
+export function cidr(s: unknown): boolean {
+  const [address, prefix, ...more] = String(s).split("/");
+  if (more.length > 0 || prefix === undefined || !/^\d{1,3}$/.test(prefix)) return false;
+  const n = Number(prefix);
+  if (ipv4Re.test(address ?? "")) return n >= 0 && n <= 32;
+  if (ipv6Address(address ?? "")) return n >= 0 && n <= 128;
+  return false;
+}
+
+// The network contract: the selected provider's SSH sources must name at
+// least one CIDR — a machine nobody can reach is not a deployment — and every
+// entry of all three lists must be one. An empty HTTP list is allowed and
+// means no public HTTP; an empty STUN list means no public STUN. Refusing
+// beats defaulting: a silent default-open in front of a control plane is worse
+// than a validation error.
+export function sourceErrors(opts: Opts): string[] {
+  const sshKey = computeKey(opts, "ssh-sources");
+  const httpKey = computeKey(opts, "http-sources");
+  const stunKey = computeKey(opts, "stun-sources");
+  const errors: string[] = [];
+  if (!missing(opts[sshKey]) && cidrs(opts, sshKey).length === 0) {
+    errors.push(`:${sshKey} must list at least one CIDR`);
+  }
+  for (const key of [sshKey, httpKey, stunKey]) {
+    if (missing(opts[key])) continue;
+    for (const entry of cidrs(opts, key)) {
+      if (!cidr(entry)) errors.push(`:${key} entry ${JSON.stringify(entry)} is not an IPv4 or IPv6 CIDR`);
+    }
+  }
+  return errors;
+}
+
+// Checks that hold only for the selected provider. Keys of the other provider
+// are ignored, never refused. The *resolved* machine name is validated against
+// the provider's rules rather than passed through unread (Compute Name
+// Standard §2): an override is checked as itself, and a profile that falls
+// through as the name is checked too, because a profile Vultr accepts as a
+// label can be a droplet name DigitalOcean refuses mid-apply. The error names
+// the key the value came from. A blank resolved value is skipped, so a missing
+// profile reports `is required` alone.
+export function providerErrors(opts: Opts): string[] {
+  const errors: string[] = [];
+  const nameKey = computeKey(opts, "name");
+  const rule = nameRules[String(opts["provider-compute"])];
+  const override = !placeholder(opts[nameKey]);
+  const name = computeName(opts);
+  const source = override ? `:${nameKey}` : `:profile (the ${opts["provider-compute"]} machine name)`;
+  if (rule && name.trim() !== "" && (name.length > 63 || !rule.re.test(name))) {
+    errors.push(`${source} ${rule.message}`);
+  }
+  switch (opts["provider-compute"]) {
+    case "vultr": {
+      const osId = opts["vultr-os-id"];
+      if (!(missing(osId) || (typeof osId === "number" && Number.isInteger(osId)))) {
+        errors.push(":vultr-os-id must be Vultr's numeric operating-system id");
+      }
+      break;
+    }
+    case "digitalocean":
+      // No VPC is created: the region's default is discovered at plan time,
+      // and a pinned UUID or a CIDR would make this package start owning one.
+      if ("digitalocean-vpc-uuid" in opts) {
+        errors.push(":digitalocean-vpc-uuid must be absent; the default regional VPC is discovered at runtime");
+      }
+      if ("digitalocean-vpc-cidr" in opts) {
+        errors.push(":digitalocean-vpc-cidr must be absent; this package must not create a VPC");
+      }
+      break;
+    default:
+      break;
+  }
+  return errors;
+}
+
 export function envErrors(env: Record<string, string | undefined>): string[] {
   return String(env[profilePar] ?? "").length
     ? [`${profilePar} is set; profile must come from colors.yml only`]
@@ -209,11 +393,12 @@ export function envErrors(env: Record<string, string | undefined>): string[] {
 
 export function stateErrors(opts: Opts): string[] {
   const errors: string[] = [];
-  for (const key of required) {
+  const provider = computeProvider(opts);
+  for (const key of [...required, ...(provider?.required ?? [])]) {
     if (missing(opts[key])) errors.push(`:${key} is required`);
   }
-  if (opts["provider-compute"] !== "vultr") {
-    errors.push(":provider-compute must be vultr");
+  if (!provider) {
+    errors.push(`:provider-compute must be one of ${Object.keys(computeProviders).sort().join(", ")}`);
   }
   if (opts["provider-dns"] !== "cloudflare") {
     errors.push(":provider-dns must be cloudflare");
@@ -316,25 +501,45 @@ export function stateErrors(opts: Opts): string[] {
       .some((value) => !missing(value))) {
     errors.push(...modelErrors(opts));
   }
-  const osId = opts["vultr-os-id"];
-  if (!(missing(osId) || (typeof osId === "number" && Number.isInteger(osId)))) {
-    errors.push(":vultr-os-id must be Vultr's numeric operating-system id");
-  }
-  // The override is validated against the provider's rules rather than
-  // passed through unread (Compute Name Standard §2).
-  if (!(placeholder(opts["vultr-name"]) ||
-        vultrNameRe.test(String(opts["vultr-name"]).trim()))) {
-    errors.push(":vultr-name must be letters, digits, dot, dash or underscore");
-  }
+  if (provider) errors.push(...providerErrors(opts), ...sourceErrors(opts));
   return errors;
+}
+
+// Provider switching is a rebuild, never an apply. Every provider shares one
+// state key, so a changed provider-compute on a profile whose state already
+// holds compute would plan a cross-provider replacement — and a delete would
+// render and destroy the *selected* provider's template against the wrong
+// lifecycle. `params` is the compute stage's recorded output, or undefined
+// when the state holds none; its `provider` is the registry name the template
+// that produced it belongs to. A recorded output without one predates this
+// package recording it, which makes it the default provider's.
+export function providerStateErrors(
+  opts: Opts,
+  params: Record<string, unknown> | undefined,
+): string[] {
+  if (!params) return [];
+  const selected = String(opts["provider-compute"]);
+  const recorded = String(params.provider ?? "");
+  if (recorded.length > 0 && recorded !== selected) {
+    return [`state holds a ${recorded} machine; set provider-compute back to ${recorded} and delete first`];
+  }
+  if (recorded.length === 0 && selected !== defaultComputeProvider) {
+    return ["state holds a machine with no recorded provider, created before this " +
+      `package recorded one, which makes it a ${defaultComputeProvider} machine; ` +
+      `set provider-compute back to ${defaultComputeProvider} and delete first`];
+  }
+  return [];
 }
 
 export function backendSecrets(opts: Opts): string[] {
   return providers["provider-backend"]?.[String(opts["provider-backend"])]?.secrets ?? [];
 }
 
-// What talking to the providers needs, on any real event.
-export const providerSecrets = ["vultr-api-key", "cloudflare-api-token"];
+// What talking to the providers needs, on any real event: the selected
+// compute provider's credential and Cloudflare's.
+export function providerSecrets(opts: Opts): string[] {
+  return [...(computeProvider(opts)?.secrets ?? []), "cloudflare-api-token"];
+}
 
 // What converging the machine needs, and therefore only a create.
 //
@@ -353,7 +558,7 @@ export const applicationSecrets = ["anthropic-api-key"];
 // machine would just be a lock on the exit.
 export function secretErrors(opts: Opts, event: string | undefined): string[] {
   const eventKeys = event === "create" ? applicationSecrets : [];
-  const keys = [...new Set([...providerSecrets, ...eventKeys, ...backendSecrets(opts)])];
+  const keys = [...new Set([...providerSecrets(opts), ...eventKeys, ...backendSecrets(opts)])];
   return keys.filter((key) => missing(opts[key]))
     .map((key) => `required credential is not set: ${parName(key)}`);
 }
@@ -361,7 +566,7 @@ export function secretErrors(opts: Opts, event: string | undefined): string[] {
 export function tofuEnv(opts: Opts, slot: string): Record<string, string> {
   switch (slot) {
     case "provider-compute":
-      return { "vultr-api-key": "VULTR_API_KEY" };
+      return computeProvider(opts)?.tofuEnv ?? {};
     case "provider-dns":
       return { "cloudflare-api-token": "CLOUDFLARE_API_TOKEN" };
     case "provider-backend":

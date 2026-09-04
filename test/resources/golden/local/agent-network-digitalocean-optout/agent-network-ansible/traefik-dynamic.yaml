@@ -1,0 +1,9 @@
+# TCP ServersTransport for PROXY protocol v2 to the reverse proxy: the
+# HostSNI(*) passthrough hands endpoint TLS to the proxy, and PROXY protocol
+# is how the original client address survives the hop (the proxy trusts
+# exactly Traefik's fixed address for these headers).
+tcp:
+  serversTransports:
+    pp-v2:
+      proxyProtocol:
+        version: 2

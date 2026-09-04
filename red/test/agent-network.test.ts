@@ -11,6 +11,8 @@ import * as workflow from "../src/workflow.ts";
 
 const fixtureFile = join(import.meta.dir, "../../test/fixtures/colors.yml");
 const optoutFile = join(import.meta.dir, "../../test/fixtures/optout.yml");
+const doFixtureFile = join(import.meta.dir, "../../test/fixtures/colors-digitalocean.yml");
+const doOptoutFile = join(import.meta.dir, "../../test/fixtures/optout-digitalocean.yml");
 
 function readFixture(path: string, overrides: Opts): Opts {
   const text = readFileSync(path, "utf8").replaceAll("WORKDIR", ".colors");
@@ -19,6 +21,8 @@ function readFixture(path: string, overrides: Opts): Opts {
 
 const fixture = (overrides: Opts = {}) => readFixture(fixtureFile, overrides);
 const optout = (overrides: Opts = {}) => readFixture(optoutFile, overrides);
+const doFixture = (overrides: Opts = {}) => readFixture(doFixtureFile, overrides);
+const doOptout = (overrides: Opts = {}) => readFixture(doOptoutFile, overrides);
 
 const resource = (name: string) =>
   readFileSync(join(import.meta.dir, "../resources/tools", name), "utf8");
@@ -46,9 +50,160 @@ function write(path: string, content: string) {
 // --- desired state -----------------------------------------------------------
 
 describe("validate", () => {
-  test("both fixtures are valid", () => {
+  test("all four fixtures are valid", () => {
     expect(validate.stateErrors(fixture())).toEqual([]);
     expect(validate.stateErrors(optout())).toEqual([]);
+    expect(validate.stateErrors(doFixture())).toEqual([]);
+    expect(validate.stateErrors(doOptout())).toEqual([]);
+  });
+
+  // --- the compute-provider registry (Compute Provider Standard)
+
+  test("an unsupported provider names the advertised ones", () => {
+    expect(validate.stateErrors(fixture({ "provider-compute": "hetzner" })))
+      .toContain(":provider-compute must be one of digitalocean, vultr");
+  });
+
+  test("required keys follow the selected provider", () => {
+    expect(validate.stateErrors(doFixture({ "digitalocean-size": null })))
+      .toContain(":digitalocean-size is required");
+    expect(validate.stateErrors(doFixture({ "digitalocean-stun-sources": null })))
+      .toContain(":digitalocean-stun-sources is required");
+    expect(validate.stateErrors(fixture({ "vultr-plan": null })))
+      .toContain(":vultr-plan is required");
+    // The other provider's keys are neither required nor refused, so one
+    // colors.yml can carry both and move between providers by one edit.
+    expect(validate.stateErrors(doFixture()).some((e) => e.includes("vultr"))).toBe(false);
+    expect(validate.stateErrors(fixture({ "digitalocean-region": "ams3",
+      "digitalocean-size": "s-1vcpu-1gb" }))).toEqual([]);
+    expect(validate.stateErrors(doFixture({ "vultr-os-id": "not-checked-here" }))).toEqual([]);
+  });
+
+  test("name and machine key are never required", () => {
+    for (const errors of [validate.stateErrors(fixture({ "vultr-name": null })),
+                          validate.stateErrors(doFixture())]) {
+      expect(errors.some((e) => e.includes("-name"))).toBe(false);
+      expect(errors.some((e) => e.includes("-ssh-keys"))).toBe(false);
+    }
+  });
+
+  test("vultr-os-id is checked on Vultr only", () => {
+    expect(validate.stateErrors(fixture({ "vultr-os-id": "2284" })))
+      .toContain(":vultr-os-id must be Vultr's numeric operating-system id");
+    expect(validate.stateErrors(doFixture({ "vultr-os-id": "2284" }))).toEqual([]);
+  });
+
+  test("DigitalOcean refuses a pinned or created VPC", () => {
+    const errors = validate.stateErrors(doFixture({ "digitalocean-vpc-uuid": "abc",
+      "digitalocean-vpc-cidr": "10.0.0.0/16" }));
+    expect(errors.some((e) => e.startsWith(":digitalocean-vpc-uuid must be absent"))).toBe(true);
+    expect(errors.some((e) => e.startsWith(":digitalocean-vpc-cidr must be absent"))).toBe(true);
+    // An unselected provider's keys are ignored, VPC keys included.
+    expect(validate.stateErrors(fixture({ "digitalocean-vpc-uuid": "abc" }))).toEqual([]);
+  });
+
+  test("compute keys are provider-scoped", () => {
+    expect(validate.computeKey(fixture(), "ssh-sources")).toBe("vultr-ssh-sources");
+    expect(validate.computeKey(doFixture(), "stun-sources")).toBe("digitalocean-stun-sources");
+  });
+
+  test("the name override is read from the selected provider alone", () => {
+    expect(validate.computeName(doFixture())).toBe("agent-network-digitalocean-fixture");
+    expect(validate.computeName(doOptout())).toBe("agent-network-digitalocean-optout");
+    expect(validate.computeName(doFixture({ "vultr-name": "custom-label" })))
+      .toBe("agent-network-digitalocean-fixture");
+    expect(validate.computeName(doFixture({ "digitalocean-name": "droplet-01" }))).toBe("droplet-01");
+  });
+
+  test("the name override follows the provider's rules", () => {
+    // Vultr labels are console text; DigitalOcean droplet names are
+    // hostnames, so an underscore that Vultr accepts fails at DigitalOcean.
+    expect(validate.stateErrors(fixture({ "vultr-name": "a".repeat(64) })))
+      .toContain(":vultr-name must be a safe 1-63 character name");
+    expect(validate.stateErrors(fixture({ "vultr-name": "invalid_name" }))).toEqual([]);
+    const err = ":digitalocean-name must be a hostname-like name: lowercase letters, digits, dots and hyphens, 1-63 characters";
+    for (const bad of ["invalid_name", "Upper", "-leading", "a".repeat(64)]) {
+      expect(validate.stateErrors(doFixture({ "digitalocean-name": bad }))).toContain(err);
+    }
+    expect(validate.stateErrors(doFixture({ "digitalocean-name": "agent.net-01" }))).toEqual([]);
+  });
+
+  test("the resolved name is validated when the profile is the name", () => {
+    // With no override the profile *is* the machine name, so it is held to
+    // the selected provider's rule too; the error names where the value came from.
+    const err = ":profile (the digitalocean machine name) must be a hostname-like name: lowercase letters, digits, dots and hyphens, 1-63 characters";
+    expect(validate.stateErrors(doFixture({ profile: "Prod_Name" }))).toContain(err);
+    // Vultr accepts the same profile as a label.
+    expect(validate.stateErrors(fixture({ profile: "Prod_Name" }))).toEqual([]);
+    // A valid override shadows an invalid profile.
+    expect(validate.stateErrors(doFixture({ profile: "Prod_Name", "digitalocean-name": "droplet-01" }))).toEqual([]);
+    // An invalid override reports the override's key, not the profile's.
+    const overridden = validate.stateErrors(doFixture({ profile: "Prod_Name", "digitalocean-name": "Bad_Name" }));
+    expect(overridden.some((e) => e.startsWith(":digitalocean-name must be"))).toBe(true);
+    expect(overridden.some((e) => e.startsWith(":profile"))).toBe(false);
+    // A missing profile is `is required` alone, never a name error.
+    const missing = validate.stateErrors(doFixture({ profile: null }));
+    expect(missing).toContain(":profile is required");
+    expect(missing.some((e) => e.includes("machine name"))).toBe(false);
+  });
+
+  // --- the network contract
+
+  test("cidr syntax", () => {
+    for (const ok of ["0.0.0.0/0", "10.0.0.0/8", "203.0.113.7/32", "::/0", "2001:db8::/32",
+                      "fe80::1/128", "2001:db8:0:0:0:0:0:1/64",
+                      // IPv4-embedded: a dotted quad in last position stands for two groups.
+                      "::ffff:192.0.2.1/128", "64:ff9b::192.0.2.33/96", "1:2:3:4:5:6:192.0.2.1/128"]) {
+      expect(validate.cidr(ok)).toBe(true);
+    }
+    for (const bad of ["10.0.0.0", "10.0.0.256/8", "10.0.0.0/33", "2001:db8::/129", "example.com/24",
+                       "1:::2/64", "2001:db8::1::2/64", "1:2:3:4:5:6:7:8:9/64", "", "/24", "10.0.0.0/8/8",
+                       // a bad quad, a short quad, too many groups, a quad not in last position
+                       "::ffff:192.0.2.256/128", "::ffff:192.0.2/128", "1:2:3:4:5:6:7:192.0.2.1/128",
+                       "192.0.2.1::/64", "::ffff:192.0.2.1:1/128"]) {
+      expect(validate.cidr(bad)).toBe(false);
+    }
+  });
+
+  test("ssh sources must not be empty; no public HTTP or STUN is fine", () => {
+    expect(validate.stateErrors(fixture({ "vultr-ssh-sources": [] })))
+      .toContain(":vultr-ssh-sources must list at least one CIDR");
+    expect(validate.stateErrors(doFixture({ "digitalocean-ssh-sources": " , " })))
+      .toContain(":digitalocean-ssh-sources must list at least one CIDR");
+    expect(validate.stateErrors(fixture({ "vultr-http-sources": [] }))).toEqual([]);
+    expect(validate.stateErrors(fixture({ "vultr-stun-sources": [] }))).toEqual([]);
+    expect(validate.stateErrors(doFixture({ "digitalocean-http-sources": [] }))).toEqual([]);
+    expect(validate.stateErrors(doFixture({ "digitalocean-stun-sources": [] }))).toEqual([]);
+  });
+
+  test("malformed sources are refused before any provider call", () => {
+    expect(validate.stateErrors(fixture({ "vultr-http-sources": ["0.0.0.0/0", "10.0.0.0"] })))
+      .toContain(':vultr-http-sources entry "10.0.0.0" is not an IPv4 or IPv6 CIDR');
+    expect(validate.stateErrors(fixture({ "vultr-stun-sources": ["stun.example.com/32"] })))
+      .toContain(':vultr-stun-sources entry "stun.example.com/32" is not an IPv4 or IPv6 CIDR');
+    expect(validate.stateErrors(doFixture({ "digitalocean-ssh-sources": "office.example.com/32" })))
+      .toContain(':digitalocean-ssh-sources entry "office.example.com/32" is not an IPv4 or IPv6 CIDR');
+    // Only the selected provider's lists are checked.
+    expect(validate.stateErrors(doFixture({ "vultr-ssh-sources": ["garbage"] }))).toEqual([]);
+  });
+
+  // --- provider switching is a rebuild
+
+  test("provider state is compared with the selection", () => {
+    expect(validate.providerStateErrors(fixture(), undefined)).toEqual([]);
+    expect(validate.providerStateErrors(fixture(), { provider: "vultr", ip: "203.0.113.9" })).toEqual([]);
+    expect(validate.providerStateErrors(doFixture(), { provider: "digitalocean" })).toEqual([]);
+    expect(validate.providerStateErrors(fixture(), { provider: "digitalocean", ip: "203.0.113.9" }))
+      .toEqual(["state holds a digitalocean machine; set provider-compute back to digitalocean and delete first"]);
+    expect(validate.providerStateErrors(doFixture(), { provider: "vultr" }))
+      .toEqual(["state holds a vultr machine; set provider-compute back to vultr and delete first"]);
+  });
+
+  test("legacy state without a provider is the default provider's", () => {
+    expect(validate.providerStateErrors(fixture(), { ip: "203.0.113.9" })).toEqual([]);
+    const [error] = validate.providerStateErrors(doFixture(), { ip: "203.0.113.9" });
+    expect(error).toContain("no recorded provider");
+    expect(error).toContain("set provider-compute back to vultr and delete first");
   });
 
   test("the machine key and the name key are not required", () => {
@@ -89,16 +244,15 @@ describe("validate", () => {
       "agent-network-host": "bad",
       "agent-network-server-image": "floating",
       "agent-network-letsencrypt-email": "not-an-email",
-      "provider-dns": "other", "provider-compute": "digitalocean",
+      "provider-dns": "other", "provider-compute": "hetzner",
       "agent-network-log-retention-days": 0,
       "agent-network-stun-port": 70000,
       "agent-network-gateway-subnet": "nonsense",
       "agent-network-claude-code-version": "latest",
-      "vultr-os-id": "2284",
     }));
-    expect(errors.length).toBeGreaterThanOrEqual(9);
+    expect(errors.length).toBeGreaterThanOrEqual(8);
     for (const part of ["host", "image", "letsencrypt-email", "provider-dns",
-                        "provider-compute", "os-id", "retention-days",
+                        "provider-compute", "retention-days",
                         "stun-port", "gateway-subnet", "claude-code-version"]) {
       expect(errors.some((e) => e.includes(part))).toBe(true);
     }
@@ -204,6 +358,18 @@ describe("validate", () => {
                           "ADMIN_PASSWORD", "SETUP_KEY", "PAT"]) {
       expect(errors).not.toContain(absent);
     }
+    expect(errors).not.toContain("COLORS_PAR_DO_TOKEN");
+  });
+
+  test("secrets and tofu env follow the selected provider", () => {
+    const errors = validate.secretErrors(doFixture(), "create").join("\n");
+    expect(errors).toContain("COLORS_PAR_DO_TOKEN");
+    expect(errors).toContain("COLORS_PAR_CLOUDFLARE_API_TOKEN");
+    expect(errors).toContain("COLORS_PAR_ANTHROPIC_API_KEY");
+    expect(errors).not.toContain("COLORS_PAR_VULTR_API_KEY");
+    expect(validate.tofuEnv(doFixture(), "provider-compute")).toEqual({ "do-token": "DIGITALOCEAN_TOKEN" });
+    expect(validate.tofuEnv(fixture(), "provider-compute")).toEqual({ "vultr-api-key": "VULTR_API_KEY" });
+    expect(validate.tofuEnv(fixture({ "provider-compute": "hetzner" }), "provider-compute")).toEqual({});
   });
 
   test("a delete does not ask for the anthropic key", () => {
@@ -230,6 +396,59 @@ describe("tools", () => {
     expect(tools.cidrs(data, "vultr-stun-sources")).toEqual(["0.0.0.0/0"]);
     expect(data["ssh-keygen"]).toBe(true);
     expect(tools.infrastructureData(optout())["ssh-keygen"]).toBe(false);
+    expect(tools.infrastructureData(doFixture())["ssh-keygen"]).toBe(true);
+    expect(tools.infrastructureData(doOptout())["ssh-keygen"]).toBe(false);
+  });
+
+  test("infrastructure data reads the selected provider's keys", () => {
+    // The template interpolates one resolved name and one resolved list per
+    // port, whichever provider they came from — the STUN list included.
+    const data = tools.infrastructureData(doFixture({ "digitalocean-ssh-sources": ["10.0.0.0/8"],
+      "digitalocean-stun-sources": ["198.51.100.0/24"], "vultr-ssh-sources": ["192.0.2.0/24"] }));
+    expect(data["ssh-sources-hcl"]).toBe('["10.0.0.0/8"]');
+    expect(data["stun-sources-hcl"]).toBe('["198.51.100.0/24"]');
+    expect(data["compute-name"]).toBe("agent-network-digitalocean-fixture");
+    expect(tools.infrastructureData(fixture())["compute-name"]).toBe("agent-network-fixture");
+  });
+
+  test("the template directory follows the provider", () => {
+    expect(tools.infrastructureTemplate(fixture()).name).toBe("infrastructure/vultr/main.tf");
+    expect(tools.infrastructureTemplate(doFixture()).name).toBe("infrastructure/digitalocean/main.tf");
+    // A registry entry without a template would pass every unit test and
+    // fail the first build.
+    expect(() => tools.infrastructureTemplate(fixture({ "provider-compute": "hetzner" }))).toThrow();
+  });
+
+  test("every provider template mirrors the whole rule set", () => {
+    // The firewall admits 22, 80/443 and STUN over UDP on every provider, and
+    // records which provider produced the params.
+    for (const provider of Object.keys(validate.computeProviders)) {
+      const tf = tools.infrastructureTemplate(fixture({ "provider-compute": provider })).content;
+      for (const needle of ["ssh-sources-hcl", "http-sources-hcl", "stun-sources-hcl", '"udp"',
+                            "<{ agent-network-stun-port }>", `provider = "${provider}"`]) {
+        expect(tf).toContain(needle);
+      }
+    }
+  });
+
+  test("fallback params are shaped per provider", () => {
+    expect(tools.fallbackParams(fixture())).toEqual({ provider: "vultr", ip: "192.0.2.10",
+      user: "root", sudoer: "root", name: "agent-network-fixture" });
+    expect(tools.fallbackParams(doFixture())).toEqual({ provider: "digitalocean", ip: "192.0.2.10",
+      user: "root", sudoer: "root", name: "agent-network-digitalocean-fixture" });
+  });
+
+  test("a real create refuses a missing ip output", () => {
+    // 192.0.2.10 is the documentation address build renders with; a real
+    // converge must never fall back to it.
+    const refused = tools.resolvedCompute({}, tools.fallbackParams(fixture()), undefined);
+    expect(refused["red/exit"]).toBe(1);
+    expect(String(refused["red/err"])).toContain("compute produced no ip output");
+    expect(tools.resolvedCompute({}, tools.fallbackParams(fixture()), { name: "x" })["red/exit"]).toBe(1);
+    const ok = tools.resolvedCompute({}, tools.fallbackParams(fixture()),
+      { ip: "203.0.113.9", provider: "vultr" });
+    expect(ok["red/exit"]).toBeUndefined();
+    expect(ok.ip).toBe("203.0.113.9");
   });
 
   test("every label derives from one resolved name", () => {
@@ -409,6 +628,18 @@ describe("ssh", () => {
     expect(String(opts["ssh-private-key-path"])).not.toContain(home);
   });
 
+  test("the build placeholder lands on the selected provider's key", () => {
+    // ONCE's table decides which desired-state key carries the machine key,
+    // so a second provider needs no second branch here.
+    const opts = ssh.withMachineKey(doFixture({ "red/event": "build" }));
+    expect(opts["digitalocean-ssh-keys"]).toBe(opts["ssh-public-key-path"]);
+    expect("vultr-ssh-keys" in opts).toBe(false);
+    expect(String(opts["ssh-public-key-path"])).toStartWith(ssh.buildPlaceholderDir);
+    const optedOut = ssh.withMachineKey(doOptout({ "red/event": "build" }));
+    expect(optedOut["digitalocean-ssh-keys"]).toBe("00000000");
+    expect(optedOut["ssh-public-key-path"]).toBeUndefined();
+  });
+
   test("a dry-run renders the placeholder too", () => {
     const opts = ssh.withMachineKey(fixture({ "red/event": "create", "red/dry-run": true }));
     expect(String(opts["ssh-public-key-path"])).toStartWith(ssh.buildPlaceholderDir);
@@ -511,6 +742,18 @@ describe("ssh", () => {
       async () => [{ id: "abc", name: "agent-network-fixture", public: "ssh-ed25519 THEIRS" }]);
     expect(opts["red/exit"]).toBe(1);
     expect(String(opts["red/err"])).toContain("Do not delete it");
+  });
+
+  test("preflight lists keys with the selected provider's token", async () => {
+    // ONCE selects the REST API and the token by provider; this proves the
+    // delegation hands each provider its own credential.
+    const seen: Array<[string, string]> = [];
+    const capture = async (provider: string, token: string) => { seen.push([provider, token]); return []; };
+    await ssh.preflight(ssh.withMachineKey(doFixture({ "red/event": "create",
+      "do-token": "do-secret", "vultr-api-key": "wrong" })), capture);
+    await ssh.preflight(ssh.withMachineKey(fixture({ "red/event": "create",
+      "vultr-api-key": "vultr-secret", "do-token": "wrong" })), capture);
+    expect(seen).toEqual([["digitalocean", "do-secret"], ["vultr", "vultr-secret"]]);
   });
 
   test("preflight failure is an error, not a skip", async () => {
@@ -633,31 +876,133 @@ describe("ssh-config", () => {
 // --- workflow ----------------------------------------------------------------
 
 describe("workflow", () => {
-  test("build and dry-run need no credentials and never touch ~/.ssh", async () => {
+  // The compute state is read once per run, through the injectable reader,
+  // on a real create or delete. Every lifecycle test stubs it: undefined is a
+  // readable state holding no compute, a map is a recorded `params`, and a
+  // throw is a backend that cannot be read.
+  const start = (opts: Opts, state: Record<string, unknown> | undefined) =>
+    workflow.startStep(opts, {}, async () => state);
+  const startUnreadable = (opts: Opts) =>
+    workflow.startStep(opts, {}, async () => { throw new Error("tofu output failed: no backend"); });
+  const credentials = { "vultr-api-key": "v", "do-token": "d", "cloudflare-api-token": "c",
+    "r2-access-key-id": "a", "r2-secret-access-key": "s", "anthropic-api-key": "k" };
+
+  test("build and dry-run need no credentials and never touch ~/.ssh or the state", async () => {
     // The standard forbids reading, creating, or requiring anything under
     // ~/.ssh on a build or dry-run: they render from desired state alone.
-    // A poisoned config proves nothing in the build path reads it.
+    // A poisoned config proves nothing in the build path reads it, and a
+    // throwing reader proves nothing on these paths reads the backend.
     write(join(home, ".ssh", "config"), "ServerAliveInterval 60\nHost agent-network-fixture\n");
-    for (const overrides of [{ "red/event": "build" },
-                             { "red/event": "create", "red/dry-run": true }]) {
-      const result = await workflow.startStep(fixture(overrides), {});
+    for (const opts of [fixture({ "red/event": "build" }),
+                        fixture({ "red/event": "create", "red/dry-run": true }),
+                        doFixture({ "red/event": "delete", "red/dry-run": true })]) {
+      const result = await startUnreadable(opts);
       expect(result["red/exit"]).toBe(0);
       expect(String(result["ssh-public-key-path"])).toStartWith("/home/build-placeholder");
     }
   });
 
   test("a real create requires credentials", async () => {
-    const result = await workflow.startStep(fixture({ "red/event": "create" }), {});
+    const result = await start(fixture({ "red/event": "create" }), undefined);
     expect(result["red/exit"]).toBe(2);
     expect(String(result["red/err"])).toContain("COLORS_PAR_VULTR_API_KEY");
     expect(String(result["red/err"])).toContain("COLORS_PAR_CLOUDFLARE_API_TOKEN");
     expect(String(result["red/err"])).toContain("COLORS_PAR_ANTHROPIC_API_KEY");
   });
 
+  test("a real create and delete require the selected provider's credentials", async () => {
+    const create = await start(doFixture({ "red/event": "create" }), undefined);
+    expect(create["red/exit"]).toBe(2);
+    expect(String(create["red/err"])).toContain("COLORS_PAR_DO_TOKEN");
+    expect(String(create["red/err"])).toContain("COLORS_PAR_ANTHROPIC_API_KEY");
+    expect(String(create["red/err"])).not.toContain("COLORS_PAR_VULTR_API_KEY");
+    const del = await start(doFixture({ "red/event": "delete", "compute-prevent-destroy": false }), undefined);
+    expect(del["red/exit"]).toBe(2);
+    expect(String(del["red/err"])).toContain("COLORS_PAR_DO_TOKEN");
+    expect(String(del["red/err"])).not.toContain("ANTHROPIC");
+    expect(String(del["red/err"])).not.toContain("COLORS_PAR_VULTR_API_KEY");
+    const vultr = await start(fixture({ "red/event": "delete", "compute-prevent-destroy": false }), undefined);
+    expect(String(vultr["red/err"])).toContain("COLORS_PAR_VULTR_API_KEY");
+    expect(String(vultr["red/err"])).not.toContain("COLORS_PAR_DO_TOKEN");
+  });
+
   test("delete is protected", async () => {
-    const result = await workflow.startStep(fixture({ "red/event": "delete" }), {});
+    const result = await start(fixture({ "red/event": "delete" }), undefined);
     expect(result["red/exit"]).toBe(2);
     expect(String(result["red/err"])).toContain("COMPUTE_PREVENT_DESTROY");
+  });
+
+  // --- provider switching is a rebuild, never an apply
+
+  test("a provider switch is refused on create and delete", async () => {
+    for (const event of ["create", "delete"]) {
+      const vultr = await start(fixture({ "red/event": event, "compute-prevent-destroy": false }),
+        { provider: "digitalocean", ip: "203.0.113.9" });
+      expect(vultr["red/exit"]).toBe(2);
+      expect(String(vultr["red/err"]))
+        .toContain("state holds a digitalocean machine; set provider-compute back to digitalocean and delete first");
+      // The validator order is the thing under test: the actionable error,
+      // not a missing token for the provider that was just selected.
+      expect(String(vultr["red/err"])).not.toContain("required credential is not set");
+      const digitalocean = await start(doFixture({ "red/event": event, "compute-prevent-destroy": false }),
+        { provider: "vultr", ip: "203.0.113.9" });
+      expect(digitalocean["red/exit"]).toBe(2);
+      expect(String(digitalocean["red/err"])).toContain("state holds a vultr machine; set provider-compute back to vultr");
+      expect(String(digitalocean["red/err"])).not.toContain("COLORS_PAR_DO_TOKEN");
+    }
+  });
+
+  test("legacy state accepts only the default provider", async () => {
+    for (const event of ["create", "delete"]) {
+      const vultr = await start(fixture({ "red/event": event, "compute-prevent-destroy": false }),
+        { ip: "203.0.113.9" });
+      expect(String(vultr["red/err"])).not.toContain("state holds");
+      expect(String(vultr["red/err"])).toContain("required credential is not set");
+      const digitalocean = await start(doFixture({ "red/event": event, "compute-prevent-destroy": false }),
+        { ip: "203.0.113.9" });
+      expect(digitalocean["red/exit"]).toBe(2);
+      expect(String(digitalocean["red/err"])).toContain("no recorded provider");
+      expect(String(digitalocean["red/err"])).toContain("set provider-compute back to vultr and delete first");
+      expect(String(digitalocean["red/err"])).not.toContain("COLORS_PAR_DO_TOKEN");
+    }
+  });
+
+  test("a matching provider passes to the credentials", async () => {
+    const result = await start(fixture({ "red/event": "create" }), { provider: "vultr", ip: "203.0.113.9" });
+    expect(result["red/exit"]).toBe(2);
+    expect(String(result["red/err"])).not.toContain("state holds");
+    expect(String(result["red/err"])).toContain("COLORS_PAR_VULTR_API_KEY");
+  });
+
+  test("an unreadable backend counts as no state on create", async () => {
+    // A fresh clone has no readable state and must still be able to create.
+    const result = await startUnreadable(fixture({ "red/event": "create" }));
+    expect(result["red/exit"]).toBe(2);
+    expect(String(result["red/err"])).not.toContain("could not read");
+    expect(String(result["red/err"])).not.toContain("state holds");
+    expect(String(result["red/err"])).toContain("COLORS_PAR_VULTR_API_KEY");
+  });
+
+  test("an unreadable backend fails a real delete closed", async () => {
+    // Swallowing it is how a teardown ends up converging against 192.0.2.10.
+    const result = await startUnreadable(fixture({ ...credentials, "red/event": "delete",
+      "compute-prevent-destroy": false }));
+    expect(result["red/exit"]).toBe(1);
+    expect(String(result["red/err"])).toContain("could not read the infrastructure state for the delete cleanup");
+    expect(String(result["red/err"])).toContain("no backend");
+  });
+
+  test("a real delete adopts the recorded address", async () => {
+    const adopted = await start(fixture({ ...credentials, "red/event": "delete", "compute-prevent-destroy": false }),
+      { provider: "vultr", ip: "203.0.113.9", user: "root" });
+    expect(adopted["red/exit"]).toBe(0);
+    expect(adopted.ip).toBe("203.0.113.9");
+    // A readable state without compute leaves the address unset, and the
+    // cleanup step skips itself.
+    const empty = await start(fixture({ ...credentials, "red/event": "delete", "compute-prevent-destroy": false }),
+      undefined);
+    expect(empty["red/exit"]).toBe(0);
+    expect(empty.ip).toBeUndefined();
   });
 
   test("the create graph orders the stack", () => {

@@ -1,13 +1,13 @@
 ---
 name: package-agent-network-red
-description: Provision and manage a minimal, single-node NetBird Agent Network demo on Vultr from declarative desired state — a keyless, policy-gated LLM endpoint plus a network-isolated agent container running headless Claude Code. Use when asked to deploy, converge, inspect or delete a NetBird Agent Network, a keyless LLM gateway demo, or an isolated AI-agent sandbox with identity-based model access.
+description: Provision and manage a minimal, single-node NetBird Agent Network demo on Vultr or DigitalOcean from declarative desired state — a keyless, policy-gated LLM endpoint plus a network-isolated agent container running headless Claude Code. Use when asked to deploy, converge, inspect or delete a NetBird Agent Network, a keyless LLM gateway demo, or an isolated AI-agent sandbox with identity-based model access.
 ---
 
-# NetBird Agent Network on Vultr
+# NetBird Agent Network on Vultr or DigitalOcean
 
 A Red workflow that turns one `colors.yml` into a running Agent Network
-demo: OpenTofu for the instance, its firewall and two Cloudflare records (the
-base name and its wildcard); Ansible for Traefik, the combined
+demo: OpenTofu for the machine, its provider firewall and two Cloudflare records
+(the base name and its wildcard); Ansible for Traefik, the combined
 `netbird-server`, the dashboard in agent-network-only mode, the NetBird
 reverse proxy in private mode, the control plane (provider, guardrail,
 policy, global limit), and the isolated agent container.
@@ -18,6 +18,30 @@ route to an LLM is the keyless agent-network endpoint over the WireGuard
 tunnel, where every request carries the peer's identity, passes the policy,
 and is metered. Convergence proves the claim (positive and negative space
 both) or fails.
+
+## Compute providers
+
+`provider-compute` selects `vultr` or `digitalocean`; each provider has its own
+credential and its own provider-scoped keys, and the keys of the other
+provider are ignored, so one `colors.yml` can carry both.
+
+| Provider | Credential | Keys |
+|---|---|---|
+| `vultr` | `COLORS_PAR_VULTR_API_KEY` | `vultr-region`, `vultr-plan`, `vultr-os-id`, `vultr-ssh-sources`, `vultr-http-sources`, `vultr-stun-sources` |
+| `digitalocean` | `COLORS_PAR_DO_TOKEN` | `digitalocean-region`, `digitalocean-size`, `digitalocean-image`, `digitalocean-ssh-sources`, `digitalocean-http-sources`, `digitalocean-stun-sources` |
+
+The provider firewall is the same rule set on both: 22 from the SSH sources,
+80 and 443 from the HTTP sources, STUN over UDP from the STUN sources, nothing
+else. On DigitalOcean the droplet joins the region's default VPC, discovered
+at plan time; `digitalocean-vpc-uuid` and `digitalocean-vpc-cidr` are
+refused, because this package creates and pins no VPC. `<provider>-name` is
+optional and defaults to the profile. Keygen mode (the package owns
+`~/.ssh/<profile>` when `<provider>-ssh-keys` is absent) works on both
+providers.
+
+**Switching providers is a rebuild, never an apply.** A profile whose state
+already holds a machine refuses a create or delete under a different
+`provider-compute` — set it back, `delete`, then switch.
 
 ## Verbs
 
@@ -35,7 +59,8 @@ launcher walks up from the working directory to find `colors.yml`.
 
 - The hostname and its wildcard must be free in the Cloudflare zone. The DNS
   stage creates both and never adopts a foreign record.
-- Five credentials must be set in `.envrc.private`; see
+- Five credentials must be set in `.envrc.private` — the selected compute
+  provider's, Cloudflare's, the two R2 keys and the Anthropic key; see
   `references/configuration.md`. Never export `COLORS_PAR_PROFILE`.
 - A deliberately fake `COLORS_PAR_ANTHROPIC_API_KEY` is a supported mode: the
   acceptance suite then expects Anthropic's own 401 relayed through the proxy,

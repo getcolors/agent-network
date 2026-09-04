@@ -1,0 +1,33 @@
+{
+  "host" : "agent-network.example.com",
+  "admin_email" : "admin@example.com",
+  "admin_name" : "Operator",
+  "provider" : {
+    "provider_id" : "anthropic_api",
+    "name" : "Anthropic",
+    "upstream_url" : "https://api.anthropic.com",
+    "models" : [ {
+      "id" : "claude-haiku-4-5-20251001",
+      "input_per_1k" : 0.001,
+      "output_per_1k" : 0.005,
+      "cache_read_per_1k" : 1.0E-4,
+      "cache_creation_per_1k" : 0.00125
+    }, {
+      "id" : "claude-sonnet-4-5-20250929",
+      "input_per_1k" : 0.003,
+      "output_per_1k" : 0.015,
+      "cache_read_per_1k" : 3.0E-4,
+      "cache_creation_per_1k" : 0.00375
+    } ]
+  },
+  "allowed_models" : [ "claude-haiku-4-5-20251001" ],
+  "policy" : {
+    "budget_usd_per_day" : 2,
+    "tokens_per_day" : 2000000
+  },
+  "global" : {
+    "budget_usd_per_day" : 5,
+    "tokens_per_day" : 5000000
+  },
+  "log_retention_days" : 7
+}

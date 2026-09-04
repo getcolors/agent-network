@@ -28,7 +28,8 @@ import ansibleStatus from "../resources/tools/ansible/status.sh" with { type: "t
 import ansibleFirewallSh from "../resources/tools/ansible/firewall.sh" with { type: "text" };
 import ansibleFirewallService from "../resources/tools/ansible/firewall.service" with { type: "text" };
 import dnsMainTf from "../resources/tools/dns/main.tf" with { type: "text" };
-import infrastructureMainTf from "../resources/tools/infrastructure/main.tf" with { type: "text" };
+import infrastructureDigitaloceanTf from "../resources/tools/infrastructure/digitalocean/main.tf" with { type: "text" };
+import infrastructureVultrTf from "../resources/tools/infrastructure/vultr/main.tf" with { type: "text" };
 
 export const infrastructureTool = "agent-network-infrastructure";
 export const dnsTool = "agent-network-dns";
@@ -42,17 +43,23 @@ export function toolDir(opts: Opts, tool: string): string {
 
 const template = (name: string, content: string): Template => ({ name, content });
 
+// One compute template per advertised provider, keyed the way green names its
+// classpath resources. A registry entry without a template here fails the
+// first build, never a unit test — which is why parity renders every fixture.
+const infrastructureTemplates: Record<string, string> = {
+  digitalocean: infrastructureDigitaloceanTf,
+  vultr: infrastructureVultrTf,
+};
+
 function spec(source: Template, target: string, data: Opts): Spec {
   return { template: source, target, data, opts: templateOpts };
 }
 
 const rawSpec = (target: string, content: string): Spec => contentSpec(target, content);
 
-export function cidrs(opts: Opts, key: string): string[] {
-  const value = opts[key];
-  const parts = Array.isArray(value) ? value : String(value ?? "").split(/[,\s]+/);
-  return parts.map((part) => String(part).trim()).filter((part) => part.length > 0);
-}
+// The source lists as validate parses them, so the template and the
+// validator can never disagree about what an entry is.
+export const cidrs = validate.cidrs;
 
 export function credentialEnv(opts: Opts, ...slots: string[]): Record<string, string> | undefined {
   const mapping: Record<string, string> = Object.assign(
@@ -69,8 +76,12 @@ export function credentialEnv(opts: Opts, ...slots: string[]): Record<string, st
 
 export const backendCredentialEnv = (opts: Opts) => credentialEnv(opts);
 
+// What `build` and `--dry-run` render in place of a compute output: the
+// documentation address, shaped like the selected provider's real `params` so
+// every later stage sees the same keys either way.
 export function fallbackParams(opts: Opts): Record<string, unknown> {
-  return { ip: "192.0.2.10", user: "root", sudoer: "root", name: validate.computeName(opts) };
+  return { provider: opts["provider-compute"], ip: "192.0.2.10", user: "root", sudoer: "root",
+    name: validate.computeName(opts) };
 }
 
 export function outputParams(result: Opts): Record<string, unknown> | undefined {
@@ -78,29 +89,55 @@ export function outputParams(result: Opts): Record<string, unknown> | undefined 
   return params && typeof params === "object" ? params as Record<string, unknown> : undefined;
 }
 
+// Refuse to hand 192.0.2.10 to Ansible. That is the documentation address the
+// credential-free build and dry-run paths render with; on a real converge a
+// missing compute output must fail loudly rather than quietly point the whole
+// playbook — and the DNS records — at TEST-NET.
+export function resolvedCompute(
+  result: Opts,
+  fallback: Record<string, unknown>,
+  outputs: Record<string, unknown> | undefined,
+): Opts {
+  if (outputs?.ip) return { ...result, ...fallback, ...outputs };
+  return { ...result, "red/exit": 1,
+    "red/err": "compute produced no ip output; refusing to converge against the documentation address" };
+}
+
 // ---------------------------------------------------------------- compute
 
+// Template values for the compute stage. The name and the three source lists
+// are resolved here once, so a template interpolates values and never branches
+// on which provider it belongs to.
 export function infrastructureData(opts: Opts): Opts {
   return {
     ...opts,
     "ssh-keygen": validate.keygen(opts),
     "compute-name": validate.computeName(opts),
-    "ssh-sources-hcl": tofu.hclList(cidrs(opts, "vultr-ssh-sources")),
-    "http-sources-hcl": tofu.hclList(cidrs(opts, "vultr-http-sources")),
-    "stun-sources-hcl": tofu.hclList(cidrs(opts, "vultr-stun-sources")),
+    "ssh-sources-hcl": tofu.hclList(cidrs(opts, validate.computeKey(opts, "ssh-sources"))),
+    "http-sources-hcl": tofu.hclList(cidrs(opts, validate.computeKey(opts, "http-sources"))),
+    "stun-sources-hcl": tofu.hclList(cidrs(opts, validate.computeKey(opts, "stun-sources"))),
   };
+}
+
+// Providers are selected by template directory, `infrastructure/<provider>/`,
+// not by conditionals inside one file; the rendered target is the same
+// `main.tf` whichever directory it came from.
+export function infrastructureTemplate(opts: Opts): Template {
+  const provider = String(opts["provider-compute"]);
+  const content = infrastructureTemplates[provider];
+  if (content === undefined) throw new Error(`template not found: infrastructure/${provider}/main.tf`);
+  return template(`infrastructure/${provider}/main.tf`, content);
 }
 
 export async function infrastructureStep(opts: Opts): Promise<Opts> {
   const dir = toolDir(opts, infrastructureTool);
-  const specs = [spec(template("infrastructure/main.tf", infrastructureMainTf),
-                      `${dir}/main.tf`, infrastructureData(opts))];
+  const specs = [spec(infrastructureTemplate(opts), `${dir}/main.tf`, infrastructureData(opts))];
   const result = await tofu.tofuWithSpec(opts, specs,
     { dir, env: credentialEnv(opts, "provider-compute") });
   if (failed(result)) return result;
   if (opts["red/event"] === "build") return { ...result, ...fallbackParams(opts) };
   if (opts["red/event"] === "delete") return result;
-  return { ...result, ...fallbackParams(opts), ...outputParams(result) };
+  return resolvedCompute(result, fallbackParams(opts), outputParams(result));
 }
 
 // -------------------------------------------------------------------- dns

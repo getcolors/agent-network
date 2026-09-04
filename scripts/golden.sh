@@ -5,11 +5,15 @@ set -euo pipefail
 # regression net in its place: render every fixture and diff against committed
 # output.
 #
-# Two fixtures, because the SSH Keypair Standard has two modes and a package
-# conforms only if both hold. `colors.yml` is keygen mode (no vultr-ssh-keys):
-# the compute template must declare the profile-named vultr_ssh_key resource
-# and reference it by attribute. `optout.yml` supplies an explicit key id and
-# must render the historical shape, byte for byte, creating nothing.
+# Four fixtures: one per advertised compute provider per keypair mode, because
+# the SSH Keypair Standard has two modes and a package conforms only if both
+# hold on every provider, and because providers are selected by template
+# directory, so a build is the only thing that proves a provider's tree renders
+# at all. `colors.yml` and `colors-digitalocean.yml` are keygen mode (no
+# `<provider>-ssh-keys`): the compute template must declare the profile-named
+# key resource and reference it by attribute. `optout.yml` and
+# `optout-digitalocean.yml` supply an explicit key id and must render the
+# historical shape, byte for byte, creating nothing.
 #
 # Keygen paths are rendered from a fixed placeholder home on :build, never from
 # $HOME, so these goldens mean the same thing on every workstation.
@@ -24,7 +28,7 @@ accept=0
 [[ ${1:-} == --accept ]] && accept=1
 
 status=0
-for variant in colors optout; do
+for variant in colors optout colors-digitalocean optout-digitalocean; do
   fixture="$tmp/$variant.yml"
   sed "s#WORKDIR#$tmp/work#" "$root/test/fixtures/$variant.yml" > "$fixture"
   (cd "$root/green" && AGENT_NETWORK_LIB_ROOT="$root" ./green build -f "$fixture" >/dev/null)
