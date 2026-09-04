@@ -7,10 +7,10 @@ colors.yml.
 
 from __future__ import annotations
 
-import json
 import re
 
 from blue.cli import par_name
+from package_once_blue import compute as once_compute
 from package_once_blue import ssh as once_ssh
 from package_once_blue.utils import registrable_domain
 from package_once_blue.validate import providers as once_providers
@@ -56,6 +56,18 @@ compute_providers = {
 # The provider a deployment created before this package recorded one in its
 # compute output must be running: the only one it ever offered.
 default_compute_provider = "vultr"
+
+# How this package describes itself to ONCE's `compute`, the Compute Provider
+# Standard's operations over a package-owned registry. The registry and the
+# default are the data above; `sources` names the firewall lists the templates
+# read — SSH must list at least one CIDR; an empty HTTP list means no public
+# HTTP and an empty STUN list no public STUN, the third list being the one
+# thing this package adds to the standard's two. The name rules are ONCE's.
+spec: once_compute.ComputeSpec = {
+    "registry": compute_providers,
+    "default": default_compute_provider,
+    "sources": {"non_empty": ["ssh-sources"], "may_be_empty": ["http-sources", "stun-sources"]},
+}
 
 # Every key desired state must carry whichever provider is selected. The
 # provider-scoped keys come from `compute_providers`.
@@ -103,19 +115,6 @@ image_pinned_re = re.compile(r"[^\s@]+(?::[^\s:@]+@sha256:[0-9a-f]{64}|:[^\s:@]+
 cidr_re = re.compile(r"(?:\d{1,3}\.){3}\d{1,3}/\d{1,2}")
 version_re = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+")
 model_id_re = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]*")
-# What each provider accepts as a machine name, checked here rather than
-# discovered mid-apply. DigitalOcean droplet names are hostname-like; Vultr
-# labels are free-form console text, held to a safe subset.
-name_rules = {
-    "digitalocean": {
-        "re": re.compile(r"[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?"),
-        "message": "must be a hostname-like name: lowercase letters, digits, dots and hyphens, 1-63 characters",
-    },
-    "vultr": {
-        "re": re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,62}"),
-        "message": "must be a safe 1-63 character name",
-    },
-}
 
 
 def _s(value) -> str:
@@ -131,29 +130,16 @@ def missing(value) -> bool:
     return value is None or (isinstance(value, str) and not value.strip())
 
 
-def placeholder(value) -> bool:
-    """Absent, blank or REPLACE_ME all mean 'use the profile' (Compute Name
-    Standard §2: presence is the only switch)."""
-    return missing(value) or _s(value).strip() == "REPLACE_ME"
+# `<provider>-<suffix>`: desired state names compute keys after the provider,
+# so the shared steps reach them through the selected provider rather than a
+# fixed prefix. ONCE's; named here so `tools` reads the same.
+compute_key = once_compute.compute_key
 
-
-def compute_provider(opts: dict) -> dict | None:
-    return compute_providers.get(_s(opts.get("provider-compute")))
-
-
-def compute_key(opts: dict, suffix: str) -> str:
-    """Desired state names compute keys after the provider, so the shared steps
-    reach them through the selected provider rather than a fixed prefix."""
-    return f"{_s(opts.get('provider-compute'))}-{suffix}"
-
-
-def compute_name(opts: dict) -> str:
-    """What this deployment calls its machine. The one function that answers it
-    — every label, including the firewall's, derives from this and never from
-    the raw override key or a second copy of the profile (§3). The override is
-    read from the selected provider's `<provider>-name` alone."""
-    override = opts.get(compute_key(opts, "name"))
-    return _s(opts.get("profile")) if placeholder(override) else _s(override).strip()
+# What this deployment calls its machine: `<provider>-name` when present,
+# else the profile (Compute Name Standard). ONCE's; every label, including the
+# firewall's, derives from this one answer and never from the raw override key
+# or a second copy of the profile (§3).
+compute_name = once_compute.compute_name
 
 
 def keygen(opts: dict) -> bool:
@@ -296,122 +282,9 @@ def model_errors(opts: dict) -> list[str]:
     return errors
 
 
-def cidrs(opts: dict, key: str) -> list[str]:
-    """A source list as desired state or an overlay string carries it: a YAML
-    list, or one string of comma- or space-separated entries."""
-    value = opts.get(key)
-    xs = value if isinstance(value, list) else re.split(r"[,\s]+", _s(value))
-    return [s for s in (_s(x).strip() for x in xs) if s]
-
-
-# Syntactic CIDR checks, the same in every colour and deliberately not a
-# resolver: an address library that accepts a hostname would let a firewall
-# source depend on DNS at apply time.
-_ipv4_re = re.compile(
-    r"(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(?:\.(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}")
-_hex_group_re = re.compile(r"[0-9A-Fa-f]{1,4}")
-
-
-def _fold_ipv4_tail(s: str) -> str | None:
-    """An IPv4-embedded address (``::ffff:192.0.2.1``, ``64:ff9b::192.0.2.33``)
-    carries a dotted quad in last position only. It stands for two 16-bit
-    groups, so it is checked as IPv4 and folded into two zero groups before
-    the group arithmetic; None when the tail is dotted but not an IPv4
-    address. A dotted quad anywhere else falls through to the hex-group check
-    and fails there."""
-    i = s.rfind(":")
-    tail = s[i + 1:] if i >= 0 else s
-    if "." not in tail:
-        return s
-    if i >= 0 and _ipv4_re.fullmatch(tail):
-        return s[:i + 1] + "0:0"
-    return None
-
-
-def _ipv6_address(raw: str) -> bool:
-    s = _fold_ipv4_tail(raw)
-    if s is None:
-        return False
-
-    def groups(part: str) -> list[str]:
-        return [] if not part.strip() else part.split(":")
-    if "::" in s:
-        halves = s.split("::")
-        if len(halves) != 2:
-            return False
-        gs = [g for half in halves for g in groups(half)]
-        return len(gs) <= 7 and all(_hex_group_re.fullmatch(g) for g in gs)
-    gs = groups(s)
-    return len(gs) == 8 and all(_hex_group_re.fullmatch(g) for g in gs)
-
-
-def cidr(s) -> bool:
-    """Whether `s` is a syntactically valid IPv4 or IPv6 CIDR: an address, a
-    slash, and a prefix length the address family allows."""
-    parts = _s(s).split("/")
-    if len(parts) != 2 or not re.fullmatch(r"\d{1,3}", parts[1]):
-        return False
-    address, n = parts[0], int(parts[1])
-    if _ipv4_re.fullmatch(address):
-        return 0 <= n <= 32
-    if _ipv6_address(address):
-        return 0 <= n <= 128
-    return False
-
-
-def source_errors(opts: dict) -> list[str]:
-    """The network contract: the selected provider's SSH sources must name at
-    least one CIDR — a machine nobody can reach is not a deployment — and
-    every entry of all three lists must be one. An empty HTTP list is allowed
-    and means no public HTTP; an empty STUN list means no public STUN.
-    Refusing beats defaulting: a silent default-open in front of a control
-    plane is worse than a validation error."""
-    ssh_key = compute_key(opts, "ssh-sources")
-    http_key = compute_key(opts, "http-sources")
-    stun_key = compute_key(opts, "stun-sources")
-    errors: list[str] = []
-    if not missing(opts.get(ssh_key)) and not cidrs(opts, ssh_key):
-        errors.append(f":{ssh_key} must list at least one CIDR")
-    for key in [ssh_key, http_key, stun_key]:
-        if missing(opts.get(key)):
-            continue
-        for entry in cidrs(opts, key):
-            if not cidr(entry):
-                errors.append(f":{key} entry {json.dumps(entry)} is not an IPv4 or IPv6 CIDR")
-    return errors
-
-
-def provider_errors(opts: dict) -> list[str]:
-    """Checks that hold only for the selected provider. Keys of the other
-    provider are ignored, never refused. The *resolved* machine name is
-    validated against the provider's rules rather than passed through unread
-    (Compute Name Standard §2): an override is checked as itself, and a
-    profile that falls through as the name is checked too, because a profile
-    Vultr accepts as a label can be a droplet name DigitalOcean refuses
-    mid-apply. The error names the key the value came from. A blank resolved
-    value is skipped, so a missing profile reports `is required` alone."""
-    errors: list[str] = []
-    name_key = compute_key(opts, "name")
-    rule = name_rules.get(_s(opts.get("provider-compute")))
-    override = not placeholder(opts.get(name_key))
-    name = compute_name(opts)
-    source = (f":{name_key}" if override
-              else f":profile (the {_s(opts.get('provider-compute'))} machine name)")
-    if rule and name.strip() and (len(name) > 63 or not rule["re"].fullmatch(name)):
-        errors.append(f"{source} {rule['message']}")
-    provider = opts.get("provider-compute")
-    if provider == "vultr":
-        os_id = opts.get("vultr-os-id")
-        if not (missing(os_id) or (isinstance(os_id, int) and not isinstance(os_id, bool))):
-            errors.append(":vultr-os-id must be Vultr's numeric operating-system id")
-    elif provider == "digitalocean":
-        # No VPC is created: the region's default is discovered at plan time,
-        # and a pinned UUID or a CIDR would make this package start owning one.
-        if "digitalocean-vpc-uuid" in opts:
-            errors.append(":digitalocean-vpc-uuid must be absent; the default regional VPC is discovered at runtime")
-        if "digitalocean-vpc-cidr" in opts:
-            errors.append(":digitalocean-vpc-cidr must be absent; this package must not create a VPC")
-    return errors
+# A source list as desired state or an overlay string carries it. ONCE's, so
+# the validator and the templates can never disagree about what an entry is.
+cidrs = once_compute.cidrs
 
 
 def env_errors(env: dict) -> list[str]:
@@ -421,14 +294,14 @@ def env_errors(env: dict) -> list[str]:
 
 
 def state_errors(opts: dict) -> list[str]:
+    """Every problem with desired state at once: the missing keys (this
+    package's and the selected provider's), the package's own checks, then the
+    Compute Provider Standard's — selection, the network contract and the
+    provider rules — which are ONCE's over `spec`."""
     errors: list[str] = []
-    provider = compute_provider(opts)
     errors += [f":{k} is required"
-               for k in [*required, *((provider or {}).get("required", []))]
+               for k in [*required, *once_compute.required_keys(spec, opts)]
                if missing(opts.get(k))]
-    if not provider:
-        errors.append(":provider-compute must be one of "
-                      + ", ".join(sorted(compute_providers)))
     if opts.get("provider-dns") != "cloudflare":
         errors.append(":provider-dns must be cloudflare")
     if opts.get("provider-backend") not in ("local", "s3", "r2"):
@@ -508,34 +381,8 @@ def state_errors(opts: dict) -> list[str]:
     if any(not missing(v) for v in [opts.get("agent-network-provider-models"),
                                     opts.get("agent-network-allowed-models")]):
         errors += model_errors(opts)
-    if provider:
-        errors += provider_errors(opts) + source_errors(opts)
+    errors += once_compute.state_errors(spec, opts)
     return errors
-
-
-def provider_state_errors(opts: dict, params: dict | None) -> list[str]:
-    """Provider switching is a rebuild, never an apply. Every provider shares
-    one state key, so a changed provider-compute on a profile whose state
-    already holds compute would plan a cross-provider replacement — and a
-    delete would render and destroy the *selected* provider's template against
-    the wrong lifecycle. `params` is the compute stage's recorded output, or
-    None when the state holds none; its `provider` is the registry name the
-    template that produced it belongs to. A recorded output without one
-    predates this package recording it, which makes it the default
-    provider's."""
-    if params is None:
-        return []
-    selected = _s(opts.get("provider-compute"))
-    recorded = _s(params.get("provider"))
-    if recorded and recorded != selected:
-        return [f"state holds a {recorded} machine; set provider-compute back to "
-                f"{recorded} and delete first"]
-    if not recorded and selected != default_compute_provider:
-        return ["state holds a machine with no recorded provider, created before this "
-                f"package recorded one, which makes it a {default_compute_provider} "
-                f"machine; set provider-compute back to {default_compute_provider} "
-                "and delete first"]
-    return []
 
 
 def backend_secrets(opts: dict) -> list[str]:
@@ -546,7 +393,7 @@ def backend_secrets(opts: dict) -> list[str]:
 def provider_secrets(opts: dict) -> list[str]:
     """What talking to the providers needs, on any real event: the selected
     compute provider's credential and Cloudflare's."""
-    return [*((compute_provider(opts) or {}).get("secrets", [])), "cloudflare-api-token"]
+    return [*once_compute.secrets(spec, opts), "cloudflare-api-token"]
 
 # What converging the machine needs, and therefore only a create.
 #
@@ -573,7 +420,7 @@ def secret_errors(opts: dict, event: str | None) -> list[str]:
 
 def tofu_env(opts: dict, slot: str) -> dict[str, str]:
     if slot == "provider-compute":
-        return (compute_provider(opts) or {}).get("tofu-env", {})
+        return once_compute.tofu_env(spec, opts)
     if slot == "provider-dns":
         return {"cloudflare-api-token": "CLOUDFLARE_API_TOKEN"}
     if slot == "provider-backend":

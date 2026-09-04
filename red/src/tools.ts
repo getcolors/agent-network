@@ -5,6 +5,7 @@ import * as tofu from "red/tofu";
 import { runtime } from "red/runtime";
 import type { Opts } from "red/workflow";
 import { failed } from "red/workflow";
+import { compute } from "package-once-red";
 import * as ssh from "./ssh.ts";
 import * as sshConfig from "./ssh-config.ts";
 import * as validate from "./validate.ts";
@@ -78,30 +79,13 @@ export const backendCredentialEnv = (opts: Opts) => credentialEnv(opts);
 
 // What `build` and `--dry-run` render in place of a compute output: the
 // documentation address, shaped like the selected provider's real `params` so
-// every later stage sees the same keys either way.
-export function fallbackParams(opts: Opts): Record<string, unknown> {
-  return { provider: opts["provider-compute"], ip: "192.0.2.10", user: "root", sudoer: "root",
-    name: validate.computeName(opts) };
-}
+// every later stage sees the same keys either way. ONCE's.
+export const fallbackParams = compute.fallbackParams;
 
-export function outputParams(result: Opts): Record<string, unknown> | undefined {
-  const params = (result["tofu/outputs"] as Record<string, unknown> | undefined)?.params;
-  return params && typeof params === "object" ? params as Record<string, unknown> : undefined;
-}
-
-// Refuse to hand 192.0.2.10 to Ansible. That is the documentation address the
-// credential-free build and dry-run paths render with; on a real converge a
-// missing compute output must fail loudly rather than quietly point the whole
-// playbook — and the DNS records — at TEST-NET.
-export function resolvedCompute(
-  result: Opts,
-  fallback: Record<string, unknown>,
-  outputs: Record<string, unknown> | undefined,
-): Opts {
-  if (outputs?.ip) return { ...result, ...fallback, ...outputs };
-  return { ...result, "red/exit": 1,
-    "red/err": "compute produced no ip output; refusing to converge against the documentation address" };
-}
+// Refuse to hand 192.0.2.10 to Ansible — and to the DNS records — on a real
+// converge whose compute output carries no `ip`. ONCE's; `infrastructureStep`
+// is what wires it.
+export const resolvedCompute = compute.resolvedCompute;
 
 // ---------------------------------------------------------------- compute
 
@@ -137,7 +121,7 @@ export async function infrastructureStep(opts: Opts): Promise<Opts> {
   if (failed(result)) return result;
   if (opts["red/event"] === "build") return { ...result, ...fallbackParams(opts) };
   if (opts["red/event"] === "delete") return result;
-  return resolvedCompute(result, fallbackParams(opts), outputParams(result));
+  return resolvedCompute(result, fallbackParams(opts), compute.outputParams(result));
 }
 
 // -------------------------------------------------------------------- dns

@@ -1,4 +1,5 @@
 import pytest
+from blue.workflow import StepError
 from conftest import do_fixture, fixture
 from package_agent_network_blue import workflow
 
@@ -22,8 +23,10 @@ def state(monkeypatch):
 
 @pytest.fixture
 def unreadable(monkeypatch):
+    # The shape `blue.tofu` raises: the SDK's StepError. Only that is an
+    # unreadable backend; anything else propagates as a defect.
     async def boom(_opts):
-        raise RuntimeError("tofu output failed: no backend")
+        raise StepError("tofu output failed: no backend")
     monkeypatch.setattr(workflow, "state_output", boom)
 
 

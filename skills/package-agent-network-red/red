@@ -37,7 +37,7 @@ import { homedir } from "node:os";
 // and break the development symlink at red/red.
 const PINS = {
   "package-agent-network-red": "github:getcolors/agent-network#d22832260f74da5a77ede268d8f86be091be37f1",
-  "package-once-red": "github:getcolors/once#759eb0311b4bdf881eab813cfe5d00f76b9310cc",
+  "package-once-red": "github:getcolors/once#eea43c2fe0d8c1d45d07ccfee41edc81ea4c7c6e",
   "red": "github:getcolors/red#db9bfe61282e2093f4098bf5a6ee0cd10added6e",
 };
 

@@ -61,6 +61,29 @@ Vultr golden changed by exactly the `provider = "vultr"` line through
 adoption, and `agent-network-vultr` — created before adoption, with no
 recorded provider — keeps working on Vultr unchanged.
 
+The operations behind all of that are not this package's code. Since the
+delegation, ONCE's `compute` namespace (`io.github.getcolors.once.compute`,
+the `compute` export of `package-once-red`, `package_once_blue.compute`)
+implements the Compute Provider Standard: selection, the CIDR grammar (IPv4-tail
+folding included) and the network contract, the name rules, the switch and
+legacy-state refusals, the missing-`ip` refusal, the state read and its
+adoption. What lives here is the data and the wiring — the registry, the
+default provider, the `spec` value in each colour's `validate` that hands both
+plus the three-list sources map (`ssh-sources` non-empty; `http-sources` and
+`stun-sources` may be empty) to ONCE, the templates and the seven-line template
+lookup, the fixtures and goldens, `state-output`, and the `start-step`
+preflight that calls ONCE's functions in the order above with a thunk carrying
+the event, so a delete still asks for no Anthropic key. `compute-name`,
+`compute-key`, `cidrs`, `fallback-params` and `resolved-compute` remain as
+package-named aliases so `tools` and the tests read as before. The
+pure-function matrix (CIDR table, name rules, per-provider checks, the switch
+rules) is tested in ONCE, in all three colours and by its parity drivers; this
+repository tests the wiring — one test per safety boundary through
+`start-step` — and one spec-content test per colour, so a colour whose spec
+drifts fails in that colour. The ONCE pin can never go below `eea43c2`, the
+first commit whose `compute` words every message identically in all colours.
+clickstack is the reference consumer of that namespace.
+
 ## The demo's claim, and where it is enforced
 
 The agent container can reach exactly two addresses, and the LLM only through
@@ -206,7 +229,7 @@ Each colour dir holds a launcher symlink to its skill payload (`green/green`,
 `red/red`, `blue/blue`).
 
 ```sh
-cd green && bb test           # 116 tests
+cd green && bb test           # 111 tests
 cd green && bb golden         # four fixtures (keygen + opt-out, Vultr + DigitalOcean), byte-for-byte
 cd green && bb golden:accept  # after an intended change — read the diff first
 cd red && bun test && bun run typecheck

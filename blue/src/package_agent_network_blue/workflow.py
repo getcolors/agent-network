@@ -8,6 +8,7 @@ from blue import dry_run, progress, tofu
 from blue.cli import par_name, read_pars
 from blue.lifecycle import preflight
 from blue.workflow import advice_add, failed, workflow
+from package_once_blue import compute as once_compute
 
 from . import ssh, ssh_config, tools, validate
 
@@ -19,56 +20,13 @@ DEFAULTS = {"provider-compute": validate.default_compute_provider,
 
 async def state_output(opts: dict) -> dict | None:
     """Compute params recorded in the infrastructure state; None when the
-    state holds none. An unreadable backend raises — `read_state` is where
-    the two are told apart, because create and delete treat them
-    differently."""
+    state holds none. An unreadable backend raises the SDK's `StepError`,
+    which `once_compute.read_state` turns into `{"error": message}` — create
+    and delete treat the two differently. Kept local, and looked up on this
+    module at call time, so tests can replace it."""
     outputs = await tofu.outputs(tools.tool_dir(opts, tools.infrastructure_tool),
                                  tools.backend_credential_env(opts))
     return (outputs or {}).get("params")
-
-
-async def read_state(opts: dict, reader=None) -> dict:
-    """One read of the compute state per run, shaped so a caller can tell
-    nothing recorded from nothing readable: `{"params": m}` where `m` may be
-    None, or `{"error": message}`. Needs backend credentials only. The reader
-    defaults to `state_output` at call time so tests can replace it on the
-    module."""
-    try:
-        return {"params": await (reader or state_output)(opts)}
-    except Exception as e:  # noqa: BLE001 — every failure means "unreadable"
-        return {"error": str(e)}
-
-
-def lifecycle_event(context: dict) -> bool:
-    """A real create or delete: the two events that touch a provider."""
-    return bool(context["real"] and context["event"] in ("create", "delete"))
-
-
-def provider_validator(opts: dict, event: str | None, state: dict) -> list[str]:
-    """Compute Provider Standard §4 before the credentials. The recorded
-    provider is compared with the selected one first, so a mistaken provider
-    edit reports the actionable error — put it back and delete — rather than
-    a missing token for the provider that was just selected. On a create an
-    unreadable backend counts as no state (a fresh clone has none) and the
-    credentials are checked as usual; on a delete `adopt_state` refuses it
-    after validation."""
-    mismatch = validate.provider_state_errors(opts, state.get("params"))
-    return mismatch if mismatch else validate.secret_errors(opts, event)
-
-
-def adopt_state(opts: dict, state: dict) -> dict:
-    """A real delete runs the ansible cleanup before the infrastructure step,
-    so the instance address must come out of the existing state here. A
-    readable state without compute params leaves `ip` unset and the cleanup
-    step skips itself; an unreadable backend fails loudly — swallowing it is
-    how a live teardown ends up converging against 192.0.2.10."""
-    if state.get("error") is not None:
-        return {**opts, "blue/exit": 1,
-                "blue/err": ("could not read the infrastructure state for the "
-                             f"delete cleanup: {state['error']}\n"
-                             "fix the backend credentials and retry; a delete that "
-                             "cannot see its state has nothing to address")}
-    return {**ssh.with_machine_key(opts), **(state.get("params") or {}), "blue/exit": 0}
 
 
 async def start_step(original: dict, env: dict | None = None) -> dict:
@@ -79,7 +37,8 @@ async def start_step(original: dict, env: dict | None = None) -> dict:
     environment = dict(os.environ if env is None else env)
     overlaid = read_pars({**DEFAULTS, **original}, environment)
     context = {"event": overlaid.get("blue/event"), "real": not overlaid.get("blue/dry-run")}
-    state = await read_state(overlaid) if lifecycle_event(context) else {}
+    state = (await once_compute.read_state(overlaid, state_output)
+             if once_compute.lifecycle_event(context) else {})
 
     # The machine key's create matrix and the provider preflight run before
     # any template is rendered: an unowned key on disk or at the provider
@@ -90,7 +49,7 @@ async def start_step(original: dict, env: dict | None = None) -> dict:
     async def after(opts, _env, ctx):
         real, event = ctx["real"], ctx["event"]
         if real and event == "delete":
-            return adopt_state(opts, state)
+            return once_compute.adopt_state(opts, "delete", state)
         if real and event == "create":
             async def recorded(_opts):
                 return state.get("params")
@@ -111,8 +70,14 @@ async def start_step(original: dict, env: dict | None = None) -> dict:
         validators=[
             lambda _o, e, _c: validate.env_errors(e),
             lambda o, _e, _c: validate.state_errors(o),
-            lambda o, _e, c: (provider_validator(o, c["event"], state)
-                              if lifecycle_event(c) else []),
+            # Standard §4 before the credentials: a recorded provider that
+            # differs from the selected one reports the actionable error, not
+            # a missing token for the provider that was just selected. The
+            # thunk carries the event: a delete asks for no Anthropic key.
+            lambda o, _e, c: (once_compute.provider_validator(
+                validate.spec, o, state.get("params"),
+                lambda: validate.secret_errors(o, c["event"]))
+                if once_compute.lifecycle_event(c) else []),
             lambda o, _e, c: ([f"compute destruction is protected; set "
                                f"{par_name('compute-prevent-destroy')}=false to delete"]
                               if c["real"] and c["event"] == "delete"

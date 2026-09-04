@@ -6,6 +6,7 @@
             [green.progress :as progress]
             [green.tofu :as tofu]
             [green.workflow :as wf]
+            [io.github.getcolors.once.compute :as compute]
             [io.github.getcolors.agent-network.ssh :as ssh]
             [io.github.getcolors.agent-network.ssh-config :as ssh-config]
             [io.github.getcolors.agent-network.tools :as tools]
@@ -18,51 +19,13 @@
 
 (defn state-output
   "Compute params recorded in the infrastructure state; nil when the state
-  holds none. An unreadable backend throws — `read-state` is where the two are
-  told apart, because create and delete treat them differently."
+  holds none. An unreadable backend throws the SDK's step error, which
+  `compute/read-state` turns into `{:error message}` — create and delete
+  treat the two differently. Kept local so tests can redefine it."
   [opts]
   (some-> (tofu/outputs (tools/tool-dir opts tools/infrastructure-tool)
                         (tools/backend-credential-env opts))
           :params walk/keywordize-keys))
-
-(defn read-state
-  "One read of the compute state per run, shaped so a caller can tell nothing
-  recorded from nothing readable: `{:params m}` where `m` may be nil, or
-  `{:error message}`. Needs backend credentials only."
-  [opts]
-  (try {:params (state-output opts)}
-       (catch Exception e {:error (ex-message e)})))
-
-(defn lifecycle-event?
-  "A real create or delete: the two events that touch a provider."
-  [{:keys [event real?]}]
-  (and real? (contains? #{:create :delete} event)))
-
-(defn provider-validator
-  "Compute Provider Standard §4 before the credentials. The recorded provider
-  is compared with the selected one first, so a mistaken provider edit reports
-  the actionable error — put it back and delete — rather than a missing token
-  for the provider that was just selected. On a create an unreadable backend
-  counts as no state (a fresh clone has none) and the credentials are checked
-  as usual; on a delete `adopt-state` refuses it after validation."
-  [opts event {:keys [params]}]
-  (let [mismatch (validate/provider-state-errors opts params)]
-    (if (seq mismatch) mismatch (validate/secret-errors opts event))))
-
-(defn adopt-state
-  "A real delete runs the ansible cleanup before the infrastructure step, so
-  the instance address must come out of the existing state here. A readable
-  state without compute params leaves :ip unset and the cleanup step skips
-  itself; an unreadable backend fails loudly — swallowing it is how a live
-  teardown ends up converging against 192.0.2.10."
-  [opts {:keys [params error]}]
-  (if error
-    (assoc opts :green/exit 1
-           :green/err (str "could not read the infrastructure state for the "
-                           "delete cleanup: " error "\n"
-                           "fix the backend credentials and retry; a delete that "
-                           "cannot see its state has nothing to address"))
-    (merge (ssh/with-machine-key opts) params {:green/exit 0})))
 
 (defn start-step
   ([opts] (start-step opts (System/getenv)))
@@ -73,14 +36,21 @@
    ;; validator and the after-validate share the one read.
    (let [overlaid (green-cli/read-pars (merge defaults opts) env)
          context {:event (:green/event overlaid) :real? (lifecycle/real-run? overlaid)}
-         state (when (lifecycle-event? context) (read-state overlaid))]
+         state (when (compute/lifecycle-event? context)
+                 (compute/read-state overlaid state-output))]
      (lifecycle/preflight
       opts {:defaults defaults :overlay green-cli/read-pars
             :validators
             [(fn [_ env _] (validate/env-errors env))
              (fn [opts _ _] (validate/state-errors opts))
+             ;; Standard §4 before the credentials: a recorded provider that
+             ;; differs from the selected one reports the actionable error, not
+             ;; a missing token for the provider that was just selected. The
+             ;; thunk carries the event: a delete asks for no Anthropic key.
              (fn [opts _ {:keys [event] :as ctx}]
-               (when (lifecycle-event? ctx) (provider-validator opts event state)))
+               (when (compute/lifecycle-event? ctx)
+                 (compute/provider-validator validate/spec opts (:params state)
+                                             #(validate/secret-errors opts event))))
              (fn [opts _ {:keys [event real?]}]
                (when (and real? (= :delete event) (:compute-prevent-destroy opts))
                  [(str "compute destruction is protected; set "
@@ -95,7 +65,7 @@
             (fn [opts _ {:keys [event real?]}]
               (cond
                 (and real? (= :delete event))
-                (adopt-state opts state)
+                (compute/adopt-state opts :delete state)
 
                 (and real? (= :create event))
                 (let [opts (ssh/ensure-key! opts (fn [_] (:params state)))]
