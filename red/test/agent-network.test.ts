@@ -931,6 +931,19 @@ describe("workflow", () => {
     expect(String(result["red/err"])).toContain("COLORS_PAR_VULTR_API_KEY");
   });
 
+  test("a real create on a fresh work directory reports the credentials, not a crash", async () => {
+    // No stub: the real `stateOutput` runs against a work directory that holds
+    // no stage yet, exactly as a fresh clone's first create does. The SDK's
+    // output read throws its StepError there; ONCE's `readState` must read
+    // that as an unreadable state — no state on a create — and the run must
+    // reach the credential check.
+    const workdir = mkdtempSync(join(tmpdir(), "agent-network-fresh-"));
+    const result = await workflow.startStep({ ...fixture(), "red/event": "create", workdir }, {});
+    expect(result["red/exit"]).toBe(2);
+    expect(String(result["red/err"])).toContain("COLORS_PAR_VULTR_API_KEY");
+    expect(String(result["red/err"])).not.toContain("could not read");
+  });
+
   test("an unreadable backend fails a real delete closed", async () => {
     // Swallowing it is how a teardown ends up converging against 192.0.2.10.
     const result = await startUnreadable(fixture({ ...credentials, "red/event": "delete",

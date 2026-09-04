@@ -80,8 +80,9 @@ pure-function matrix (CIDR table, name rules, per-provider checks, the switch
 rules) is tested in ONCE, in all three colours and by its parity drivers; this
 repository tests the wiring — one test per safety boundary through
 `start-step` — and one spec-content test per colour, so a colour whose spec
-drifts fails in that colour. The ONCE pin can never go below `eea43c2`, the
-first commit whose `compute` words every message identically in all colours.
+drifts fails in that colour. The ONCE pin can never go below `04f9623`, the
+first commit whose `compute` reads a missing stage directory as an unreadable
+state on a real create instead of crashing on the shell's IOException.
 clickstack is the reference consumer of that namespace.
 
 ## The demo's claim, and where it is enforced
@@ -229,7 +230,7 @@ Each colour dir holds a launcher symlink to its skill payload (`green/green`,
 `red/red`, `blue/blue`).
 
 ```sh
-cd green && bb test           # 111 tests
+cd green && bb test           # 112 tests
 cd green && bb golden         # four fixtures (keygen + opt-out, Vultr + DigitalOcean), byte-for-byte
 cd green && bb golden:accept  # after an intended change — read the diff first
 cd red && bun test && bun run typecheck

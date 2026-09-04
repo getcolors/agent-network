@@ -119,6 +119,19 @@
     (is (not (str/includes? (:green/err r) "state holds")))
     (is (str/includes? (:green/err r) "COLORS_PAR_VULTR_API_KEY"))))
 
+(deftest a-real-create-on-a-fresh-work-directory-reports-the-credentials-not-a-crash
+  ;; No stub: the real `state-output` runs against a work directory that holds
+  ;; no stage yet, exactly as a fresh clone's first create does. The SDK cannot
+  ;; launch tofu in a directory that does not exist and throws the shell's
+  ;; IOException; ONCE's `read-state` must read that as an unreadable state —
+  ;; no state on a create — and the run must reach the credential check.
+  (let [workdir (str (java.nio.file.Files/createTempDirectory
+                      "agent-network-fresh" (make-array java.nio.file.attribute.FileAttribute 0)))
+        r (workflow/start-step (assoc (fixture) :green/event :create :workdir workdir) {})]
+    (is (= 2 (:green/exit r)))
+    (is (str/includes? (:green/err r) "COLORS_PAR_VULTR_API_KEY"))
+    (is (not (str/includes? (:green/err r) "could not read")))))
+
 (deftest an-unreadable-backend-fails-a-real-delete-closed
   ;; Swallowing it is how a teardown ends up converging against 192.0.2.10.
   (let [r (start-unreadable (merge (fixture) credentials
