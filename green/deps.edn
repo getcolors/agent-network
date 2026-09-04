@@ -1,15 +1,18 @@
 {:paths ["src/clj" "src/resources"]
  :deps {org.clojure/clojure       {:mvn/version "1.12.5"}
         io.github.getcolors/green {:git/url "https://github.com/getcolors/green.git"
-                                   :git/sha "ceb4159a19ec281d60f10d11295c05c5de5f1c42"}
-        ;; 04f9623 is the first ONCE whose `compute` — the Compute Provider
+                                   :git/sha "3f33f5d4dcce1f8d97a11b6972e13eb3f0b37654"}
+        ;; 38e3cd6 is the first ONCE whose `compute` — the Compute Provider
         ;; Standard's operations this package delegates to, added in 417d5f7 —
-        ;; reads a missing stage directory as an unreadable state rather than
-        ;; letting the shell's IOException crash a fresh-clone create;
-        ;; bc06f2f, below it, is where ONCE moved the machine keypair into
-        ;; the operator's ~/.ssh. The pin cannot go below 04f9623.
+        ;; trusts the SDK's step error alone in `read-state`: it no longer
+        ;; catches the shell's IOException, so it needs green 3f33f5d above,
+        ;; which reports a tofu launch failure (missing stage directory,
+        ;; missing binary) as that step error the way red and blue always
+        ;; did. The two pins move together; bc06f2f, below them, is where
+        ;; ONCE moved the machine keypair into the operator's ~/.ssh. The
+        ;; ONCE pin cannot go below 38e3cd6 while green is at 3f33f5d.
         io.github.getcolors/once  {:git/url "https://github.com/getcolors/once.git"
-                                   :git/sha "04f9623159358882f6407618f804f70ce7067e54"
+                                   :git/sha "38e3cd66674a32fb96605e1b17ae6791086ad5c1"
                                    :deps/root "green"}}
  :aliases {:dev {:extra-paths ["test/clj" "test/resources"]}
            :test {:extra-paths ["test/clj" "test/resources"]

@@ -80,10 +80,13 @@ pure-function matrix (CIDR table, name rules, per-provider checks, the switch
 rules) is tested in ONCE, in all three colours and by its parity drivers; this
 repository tests the wiring — one test per safety boundary through
 `start-step` — and one spec-content test per colour, so a colour whose spec
-drifts fails in that colour. The ONCE pin can never go below `04f9623`, the
-first commit whose `compute` reads a missing stage directory as an unreadable
-state on a real create instead of crashing on the shell's IOException.
-clickstack is the reference consumer of that namespace.
+drifts fails in that colour. The ONCE pin can never go below `38e3cd6`, the
+first commit whose `compute` trusts the SDK's step error alone in
+`read-state`; it therefore needs the green SDK at `3f33f5d` or later, which
+reports a tofu launch failure (a missing stage directory on a fresh-clone
+create, a missing binary) as that step error the way red and blue always
+did. Move the green and ONCE pins together. clickstack is the reference
+consumer of that namespace.
 
 ## The demo's claim, and where it is enforced
 
