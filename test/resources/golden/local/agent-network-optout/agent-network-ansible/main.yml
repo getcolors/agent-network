@@ -118,7 +118,7 @@
         curl -fsSL -o /tmp/lego.tgz \
           "https://github.com/go-acme/lego/releases/download/v${v}/lego_v${v}_linux_amd64.tar.gz"
         curl -fsSL "https://github.com/go-acme/lego/releases/download/v${v}/lego_${v}_checksums.txt" \
-          | grep "lego_v${v}_linux_amd64.tar.gz" | sed 's#  .*#  /tmp/lego.tgz#' | sha256sum -c -
+          | grep -E "[[:space:]]lego_v${v}_linux_amd64\.tar\.gz$" | sed 's#  .*#  /tmp/lego.tgz#' | sha256sum -c -
         tar -xzf /tmp/lego.tgz -C /usr/local/bin lego
         chmod 0755 /usr/local/bin/lego
         rm -f /tmp/lego.tgz
