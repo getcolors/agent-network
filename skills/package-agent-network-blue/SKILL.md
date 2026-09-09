@@ -104,3 +104,5 @@ the host. The dashboard admin password is generated on the host:
 - The installed launcher is a copy, not a symlink. After `npx skills update -p`,
   copy `.agents/skills/package-agent-network-blue/blue` over the root
   `./blue`.
+
+Validated retired compute prevents remote Ansible during delete even when caller input retains a stale IP or private-key path. Remaining application and local cleanup keeps its existing ordering. Normal creation still converges the application.

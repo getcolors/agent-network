@@ -226,3 +226,5 @@ installer `pkgs.netbird.io/getting-started.sh`; management source
 Where this package contradicts the prose docs — endpoint minting, the
 tunnel-only DNS mechanism — the source is the authority, and the relevant
 finding is recorded beside the code that depends on it.
+
+Validated retired compute prevents remote Ansible during delete even when caller input retains a stale IP or private-key path. Remaining application and local cleanup keeps its existing ordering. Normal creation still converges the application.
