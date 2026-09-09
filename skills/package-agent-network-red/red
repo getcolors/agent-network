@@ -36,7 +36,7 @@ import { homedir } from "node:os";
 // directory, which would halt Bun's upward resolution of `package-agent-network-red`
 // and break the development symlink at red/red.
 const PINS = {
-  "package-agent-network-red": "github:getcolors/agent-network#84807fe99a3bfae258e6f1c349279fba536f2707",
+  "package-agent-network-red": "github:getcolors/agent-network#80ba80f5785fcdfad8dd64d4ab5fe4aebec5e1b1",
   "package-once-red": "github:getcolors/once#a1fe1be7a427dd2e406ff7befd1c43a53e7c3618",
 };
 
