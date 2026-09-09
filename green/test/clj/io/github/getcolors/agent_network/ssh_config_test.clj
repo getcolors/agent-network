@@ -149,5 +149,5 @@
          (vec (rest (workflow/wire-fn :agent-network/dns {:green/event :delete})))))
   (is (= [:agent-network/infrastructure]
          (vec (rest (workflow/wire-fn :agent-network/ssh-config {:green/event :delete})))))
-  (is (= [:agent-network/ssh-cleanup]
+  (is (= []
          (vec (rest (workflow/wire-fn :agent-network/infrastructure {:green/event :delete}))))))

@@ -9,7 +9,7 @@ tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 cp "$launcher" "$tmp/green"; chmod +x "$tmp/green"
 sed "s#WORKDIR#.colors#" "$root/test/fixtures/colors.yml" > "$tmp/colors.yml"
 (cd "$tmp" && AGENT_NETWORK_LIB_ROOT="$root" ./green build >/dev/null)
-[[ -f "$tmp/.colors/agent-network-fixture/agent-network-infrastructure/main.tf" ]]
+[[ -f "$tmp/.colors/agent-network-fixture/compute/nodes/0/node-none.tf.json" ]]
 [[ -f "$tmp/.colors/agent-network-fixture/agent-network-ansible/compose.yml" ]]
 # The launcher walks up for colors.yml, so any subdirectory works.
 mkdir -p "$tmp/nested/path"

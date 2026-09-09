@@ -50,24 +50,9 @@ The provider firewall — Vultr's or DigitalOcean's, the same rule set on both
 — opens 22, 80 and 443 TCP and 3478 UDP, and nothing more. No WireGuard port
 is published: the only peer lives on the internal Docker network.
 
-## Two compute providers
+## Compute providers
 
-`provider-compute` selects `vultr` or `digitalocean`. Each provider is a
-template directory of its own, with its own credential
-(`COLORS_PAR_VULTR_API_KEY` or `COLORS_PAR_DO_TOKEN`) and its own
-provider-scoped keys (`vultr-region`, `vultr-plan`, `vultr-os-id`;
-`digitalocean-region`, `digitalocean-size`, `digitalocean-image`; and
-`<provider>-ssh-sources` / `<provider>-http-sources` /
-`<provider>-stun-sources` on both). Keys of the unselected provider are
-ignored, so one `colors.yml` can carry both. `<provider>-name` is optional
-and defaults to the profile, and keygen mode — the package owning
-`~/.ssh/<profile>` when `<provider>-ssh-keys` is absent — works on both. On
-DigitalOcean the droplet joins the region's default VPC, discovered at plan
-time; the package creates none.
-
-Switching providers is a rebuild, never an apply: a profile whose state
-already holds a machine refuses a create or delete under a different
-`provider-compute` until it is set back and deleted.
+Compute is provided by the pinned colors-compute library. See the library boundary below for supported capabilities, remote state, and migration requirements.
 
 ## Fake-key mode
 
@@ -110,3 +95,39 @@ peer identity.
 ## License
 
 [MIT](LICENSE)
+
+## Compute library boundary
+
+All three implementations depend directly on `colors-compute` at
+`e6318347528738267826295a2e60871263d975f2`. ONCE at
+`a1fe1be7a427dd2e406ff7befd1c43a53e7c3618` supplies application domain helpers only.
+The library owns provider selection, required options, credentials, OpenTofu
+VM/firewall/key resources, remote R2/S3 state, identity checks, leases, and
+managed key cleanup. Do not add provider registries or VM templates here.
+A library version bump supplies additional compatible providers; unsupported
+requested capabilities fail before compute mutation.
+
+This package requests one public node, IPv6 disabled, TCP 22 from SSH
+sources, TCP 80/443 from HTTP sources, and its STUN UDP port from STUN sources.
+The library reads neutral `agent-network-ssh-sources`,
+`agent-network-http-sources`, and `agent-network-stun-sources`, falling back to
+the selected provider's source keys. SSH sources cannot be empty. Empty HTTP
+or STUN sources keep those ports closed. The public-only singleton needs no
+owned private network by default; DigitalOcean may assign its provider default
+VPC. Existing Vultr and DigitalOcean fixtures cover both key modes.
+
+`build` writes library JSON under `compute/shared` and `compute/nodes/0`, with
+library-produced remote backend documents. It performs no cloud calls or key
+reads. Runtime creation acquires owned state before compute credentials or keys;
+unknown, unreadable, mismatched, and legacy combined compute state are refused.
+The old `<profile>/agent-network-infrastructure.tfstate` requires an explicit
+migration procedure; absence must never be inferred from a failed read.
+
+Create runs compute, canonical SSH alias, DNS, application, then acceptance.
+Delete inspects owned state, tears down the application, removes DNS and alias,
+then destroys library compute and removes its managed key. The profile alias
+contains the actual node user/address; only managed mode adds `IdentityFile`.
+An explicitly selected external private path reaches Ansible and acceptance SSH.
+The package owns its locked SSH updater; existing profile-only markers are
+recognized. Generated credentials, STUN, tunnel-only policy, and all isolation
+acceptance gates remain application-owned.

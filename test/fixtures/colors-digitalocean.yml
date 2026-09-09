@@ -20,7 +20,7 @@ workdir: WORKDIR
 
 provider-compute: digitalocean
 provider-dns: cloudflare
-provider-backend: local
+provider-backend: r2
 
 # Preserve this guard in committed desired state. Destruction requires an
 # explicitly authorized one-run override; never edit this flag to bypass it.

@@ -20,7 +20,7 @@ workdir: WORKDIR
 
 provider-compute: digitalocean
 provider-dns: cloudflare
-provider-backend: local
+provider-backend: r2
 
 # Preserve this guard in committed desired state. Destruction requires an
 # explicitly authorized one-run override; never edit this flag to bypass it.
@@ -123,4 +123,4 @@ r2-endpoint: https://example.eu.r2.cloudflarestorage.com
 
 # Opt-out mode: an explicit account key id. The package touches no key material
 # at all and the compute template must render the historical shape.
-digitalocean-ssh-keys: "00000000"
+digitalocean-ssh-keys: "12345678"

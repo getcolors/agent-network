@@ -20,73 +20,41 @@ one is a production control plane with Authentik; this one is a demo whose
 product is an isolation claim). Read its CLAUDE.md for the combined-server
 background; differences below are deliberate.
 
-## Two compute providers
+## Compute library boundary
 
-The package follows the workspace Compute Provider Standard
-(`../workspace/standards/compute-provider.md`), with `clickstack` as the
-reference shape. Providers are selected by template directory —
-`tools/infrastructure/vultr/` and `tools/infrastructure/digitalocean/` —
-never by conditionals, so a build is the only thing that proves a provider's
-tree renders at all. The registry is `compute-providers` in `validate.clj`
-(mirrored in `validate.ts` and `validate.py`): provider name to its required
-keys, its secret (`:vultr-api-key` or `:do-token`), and the environment
-variable OpenTofu reads it from. Keys of the unselected provider are accepted
-and ignored, so one `colors.yml` moves between providers by one edit.
-`<provider>-name` is optional and resolves through `compute-name`, profile by
-default; `compute-key` is how the shared steps reach `<provider>-ssh-sources`,
-`<provider>-http-sources` and — the one thing this package adds to the
-standard's two lists — `<provider>-stun-sources`, because STUN over UDP is a
-published port here and every provider's firewall mirrors the whole rule set.
-Every entry of all three lists must be a syntactically valid IPv4 or IPv6
-CIDR and the SSH list must not be empty, refused before any provider call; an
-empty HTTP or STUN list means that service is not public. The DigitalOcean
-template emits the 80/443 and STUN rules through `dynamic` blocks because a
-DigitalOcean inbound rule with no source is an API error, not a closed port,
-and joins the region's default VPC discovered at plan time —
-`digitalocean-vpc-uuid` and `digitalocean-vpc-cidr` are refused.
+All three implementations depend directly on `colors-compute` at
+`e6318347528738267826295a2e60871263d975f2`. ONCE at
+`a1fe1be7a427dd2e406ff7befd1c43a53e7c3618` supplies application domain helpers only.
+The library owns provider selection, required options, credentials, OpenTofu
+VM/firewall/key resources, remote R2/S3 state, identity checks, leases, and
+managed key cleanup. Do not add provider registries or VM templates here.
+A library version bump supplies additional compatible providers; unsupported
+requested capabilities fail before compute mutation.
 
-Every provider's compute stage outputs the same `params` —
-`{provider, ip, user, sudoer, name, ssh_key_id (keygen only)}` — and
-`provider` is the switch guard. Both providers share one state key, so
-`start-step` reads the state once, up front, with backend credentials alone,
-and a validator placed after `state-errors` and before the credential check
-refuses a real create or delete whose recorded provider differs from the
-selected one (`state holds a <recorded> machine; set provider-compute back to
-<recorded> and delete first`). A recorded `params` without `provider`
-predates this package recording one and is treated as Vultr. An unreadable
-backend is no state on a real create and fails a real delete closed
-(`adopt-state`); a real create whose compute output carries no `ip` refuses to
-converge against the documentation address (`resolved-compute`). The
-Vultr golden changed by exactly the `provider = "vultr"` line through
-adoption, and `agent-network-vultr` — created before adoption, with no
-recorded provider — keeps working on Vultr unchanged.
+This package requests one public node, IPv6 disabled, TCP 22 from SSH
+sources, TCP 80/443 from HTTP sources, and its STUN UDP port from STUN sources.
+The library reads neutral `agent-network-ssh-sources`,
+`agent-network-http-sources`, and `agent-network-stun-sources`, falling back to
+the selected provider's source keys. SSH sources cannot be empty. Empty HTTP
+or STUN sources keep those ports closed. The public-only singleton needs no
+owned private network by default; DigitalOcean may assign its provider default
+VPC. Existing Vultr and DigitalOcean fixtures cover both key modes.
 
-The operations behind all of that are not this package's code. Since the
-delegation, ONCE's `compute` namespace (`io.github.getcolors.once.compute`,
-the `compute` export of `package-once-red`, `package_once_blue.compute`)
-implements the Compute Provider Standard: selection, the CIDR grammar (IPv4-tail
-folding included) and the network contract, the name rules, the switch and
-legacy-state refusals, the missing-`ip` refusal, the state read and its
-adoption. What lives here is the data and the wiring — the registry, the
-default provider, the `spec` value in each colour's `validate` that hands both
-plus the three-list sources map (`ssh-sources` non-empty; `http-sources` and
-`stun-sources` may be empty) to ONCE, the templates and the seven-line template
-lookup, the fixtures and goldens, `state-output`, and the `start-step`
-preflight that calls ONCE's functions in the order above with a thunk carrying
-the event, so a delete still asks for no Anthropic key. `compute-name`,
-`compute-key`, `cidrs`, `fallback-params` and `resolved-compute` remain as
-package-named aliases so `tools` and the tests read as before. The
-pure-function matrix (CIDR table, name rules, per-provider checks, the switch
-rules) is tested in ONCE, in all three colours and by its parity drivers; this
-repository tests the wiring — one test per safety boundary through
-`start-step` — and one spec-content test per colour, so a colour whose spec
-drifts fails in that colour. The ONCE pin can never go below `38e3cd6`, the
-first commit whose `compute` trusts the SDK's step error alone in
-`read-state`; it therefore needs the green SDK at `3f33f5d` or later, which
-reports a tofu launch failure (a missing stage directory on a fresh-clone
-create, a missing binary) as that step error the way red and blue always
-did. Move the green and ONCE pins together. clickstack is the reference
-consumer of that namespace.
+`build` writes library JSON under `compute/shared` and `compute/nodes/0`, with
+library-produced remote backend documents. It performs no cloud calls or key
+reads. Runtime creation acquires owned state before compute credentials or keys;
+unknown, unreadable, mismatched, and legacy combined compute state are refused.
+The old `<profile>/agent-network-infrastructure.tfstate` requires an explicit
+migration procedure; absence must never be inferred from a failed read.
+
+Create runs compute, canonical SSH alias, DNS, application, then acceptance.
+Delete inspects owned state, tears down the application, removes DNS and alias,
+then destroys library compute and removes its managed key. The profile alias
+contains the actual node user/address; only managed mode adds `IdentityFile`.
+An explicitly selected external private path reaches Ansible and acceptance SSH.
+The package owns its locked SSH updater; existing profile-only markers are
+recognized. Generated credentials, STUN, tunnel-only policy, and all isolation
+acceptance gates remain application-owned.
 
 ## The demo's claim, and where it is enforced
 
@@ -233,7 +201,7 @@ Each colour dir holds a launcher symlink to its skill payload (`green/green`,
 `red/red`, `blue/blue`).
 
 ```sh
-cd green && bb test           # 112 tests
+cd green && bb test
 cd green && bb golden         # four fixtures (keygen + opt-out, Vultr + DigitalOcean), byte-for-byte
 cd green && bb golden:accept  # after an intended change — read the diff first
 cd red && bun test && bun run typecheck

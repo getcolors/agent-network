@@ -19,29 +19,41 @@ tunnel, where every request carries the peer's identity, passes the policy,
 and is metered. Convergence proves the claim (positive and negative space
 both) or fails.
 
-## Compute providers
+## Compute library boundary
 
-`provider-compute` selects `vultr` or `digitalocean`; each provider has its own
-credential and its own provider-scoped keys, and the keys of the other
-provider are ignored, so one `colors.yml` can carry both.
+All three implementations depend directly on `colors-compute` at
+`e6318347528738267826295a2e60871263d975f2`. ONCE at
+`a1fe1be7a427dd2e406ff7befd1c43a53e7c3618` supplies application domain helpers only.
+The library owns provider selection, required options, credentials, OpenTofu
+VM/firewall/key resources, remote R2/S3 state, identity checks, leases, and
+managed key cleanup. Do not add provider registries or VM templates here.
+A library version bump supplies additional compatible providers; unsupported
+requested capabilities fail before compute mutation.
 
-| Provider | Credential | Keys |
-|---|---|---|
-| `vultr` | `COLORS_PAR_VULTR_API_KEY` | `vultr-region`, `vultr-plan`, `vultr-os-id`, `vultr-ssh-sources`, `vultr-http-sources`, `vultr-stun-sources` |
-| `digitalocean` | `COLORS_PAR_DO_TOKEN` | `digitalocean-region`, `digitalocean-size`, `digitalocean-image`, `digitalocean-ssh-sources`, `digitalocean-http-sources`, `digitalocean-stun-sources` |
+This package requests one public node, IPv6 disabled, TCP 22 from SSH
+sources, TCP 80/443 from HTTP sources, and its STUN UDP port from STUN sources.
+The library reads neutral `agent-network-ssh-sources`,
+`agent-network-http-sources`, and `agent-network-stun-sources`, falling back to
+the selected provider's source keys. SSH sources cannot be empty. Empty HTTP
+or STUN sources keep those ports closed. The public-only singleton needs no
+owned private network by default; DigitalOcean may assign its provider default
+VPC. Existing Vultr and DigitalOcean fixtures cover both key modes.
 
-The provider firewall is the same rule set on both: 22 from the SSH sources,
-80 and 443 from the HTTP sources, STUN over UDP from the STUN sources, nothing
-else. On DigitalOcean the droplet joins the region's default VPC, discovered
-at plan time; `digitalocean-vpc-uuid` and `digitalocean-vpc-cidr` are
-refused, because this package creates and pins no VPC. `<provider>-name` is
-optional and defaults to the profile. Keygen mode (the package owns
-`~/.ssh/<profile>` when `<provider>-ssh-keys` is absent) works on both
-providers.
+`build` writes library JSON under `compute/shared` and `compute/nodes/0`, with
+library-produced remote backend documents. It performs no cloud calls or key
+reads. Runtime creation acquires owned state before compute credentials or keys;
+unknown, unreadable, mismatched, and legacy combined compute state are refused.
+The old `<profile>/agent-network-infrastructure.tfstate` requires an explicit
+migration procedure; absence must never be inferred from a failed read.
 
-**Switching providers is a rebuild, never an apply.** A profile whose state
-already holds a machine refuses a create or delete under a different
-`provider-compute` — set it back, `delete`, then switch.
+Create runs compute, canonical SSH alias, DNS, application, then acceptance.
+Delete inspects owned state, tears down the application, removes DNS and alias,
+then destroys library compute and removes its managed key. The profile alias
+contains the actual node user/address; only managed mode adds `IdentityFile`.
+An explicitly selected external private path reaches Ansible and acceptance SSH.
+The package owns its locked SSH updater; existing profile-only markers are
+recognized. Generated credentials, STUN, tunnel-only policy, and all isolation
+acceptance gates remain application-owned.
 
 ## Verbs
 

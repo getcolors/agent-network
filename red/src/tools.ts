@@ -5,8 +5,7 @@ import * as tofu from "red/tofu";
 import { runtime } from "red/runtime";
 import type { Opts } from "red/workflow";
 import { failed } from "red/workflow";
-import { compute } from "package-once-red";
-import * as ssh from "./ssh.ts";
+import * as compute from "./compute.ts";
 import * as sshConfig from "./ssh-config.ts";
 import * as validate from "./validate.ts";
 
@@ -29,8 +28,6 @@ import ansibleStatus from "../resources/tools/ansible/status.sh" with { type: "t
 import ansibleFirewallSh from "../resources/tools/ansible/firewall.sh" with { type: "text" };
 import ansibleFirewallService from "../resources/tools/ansible/firewall.service" with { type: "text" };
 import dnsMainTf from "../resources/tools/dns/main.tf" with { type: "text" };
-import infrastructureDigitaloceanTf from "../resources/tools/infrastructure/digitalocean/main.tf" with { type: "text" };
-import infrastructureVultrTf from "../resources/tools/infrastructure/vultr/main.tf" with { type: "text" };
 
 export const infrastructureTool = "agent-network-infrastructure";
 export const dnsTool = "agent-network-dns";
@@ -43,14 +40,6 @@ export function toolDir(opts: Opts, tool: string): string {
 }
 
 const template = (name: string, content: string): Template => ({ name, content });
-
-// One compute template per advertised provider, keyed the way green names its
-// classpath resources. A registry entry without a template here fails the
-// first build, never a unit test — which is why parity renders every fixture.
-const infrastructureTemplates: Record<string, string> = {
-  digitalocean: infrastructureDigitaloceanTf,
-  vultr: infrastructureVultrTf,
-};
 
 function spec(source: Template, target: string, data: Opts): Spec {
   return { template: source, target, data, opts: templateOpts };
@@ -77,66 +66,23 @@ export function credentialEnv(opts: Opts, ...slots: string[]): Record<string, st
 
 export const backendCredentialEnv = (opts: Opts) => credentialEnv(opts);
 
-// What `build` and `--dry-run` render in place of a compute output: the
-// documentation address, shaped like the selected provider's real `params` so
-// every later stage sees the same keys either way. ONCE's.
-export const fallbackParams = compute.fallbackParams;
-
-// Refuse to hand 192.0.2.10 to Ansible — and to the DNS records — on a real
-// converge whose compute output carries no `ip`. ONCE's; `infrastructureStep`
-// is what wires it.
-export const resolvedCompute = compute.resolvedCompute;
-
-// ---------------------------------------------------------------- compute
-
-// Template values for the compute stage. The name and the three source lists
-// are resolved here once, so a template interpolates values and never branches
-// on which provider it belongs to.
-export function infrastructureData(opts: Opts): Opts {
-  return {
-    ...opts,
-    "ssh-keygen": validate.keygen(opts),
-    "compute-name": validate.computeName(opts),
-    "ssh-sources-hcl": tofu.hclList(cidrs(opts, validate.computeKey(opts, "ssh-sources"))),
-    "http-sources-hcl": tofu.hclList(cidrs(opts, validate.computeKey(opts, "http-sources"))),
-    "stun-sources-hcl": tofu.hclList(cidrs(opts, validate.computeKey(opts, "stun-sources"))),
-  };
-}
-
-// Providers are selected by template directory, `infrastructure/<provider>/`,
-// not by conditionals inside one file; the rendered target is the same
-// `main.tf` whichever directory it came from.
-export function infrastructureTemplate(opts: Opts): Template {
-  const provider = String(opts["provider-compute"]);
-  const content = infrastructureTemplates[provider];
-  if (content === undefined) throw new Error(`template not found: infrastructure/${provider}/main.tf`);
-  return template(`infrastructure/${provider}/main.tf`, content);
-}
-
-export async function infrastructureStep(opts: Opts): Promise<Opts> {
-  const dir = toolDir(opts, infrastructureTool);
-  const specs = [spec(infrastructureTemplate(opts), `${dir}/main.tf`, infrastructureData(opts))];
-  const result = await tofu.tofuWithSpec(opts, specs,
-    { dir, env: credentialEnv(opts, "provider-compute") });
-  if (failed(result)) return result;
-  if (opts["red/event"] === "build") return { ...result, ...fallbackParams(opts) };
-  if (opts["red/event"] === "delete") return result;
-  return resolvedCompute(result, fallbackParams(opts), compute.outputParams(result));
-}
+export function fallbackParams(opts:Opts):Record<string,unknown>{if(opts['red/event']!=='build'&&!opts['red/dry-run'])throw new Error('compute parameters unavailable');return {ip:'192.0.2.10',user:'root',sudoer:'root',name:validate.computeName(opts)};}
+export const infrastructureStep=compute.infrastructureStep;
 
 // -------------------------------------------------------------------- dns
 
-// The base record and its wildcard, both unproxied.
+// Two explicit records, both unproxied.
 //
 // Unproxied because Cloudflare's proxy is an HTTP proxy: UDP STUN on 3478 does
-// not survive it, and both certificate paths — Traefik's TLS-ALPN-01 for the
-// base name and the reverse proxy's own ACME for generated endpoint hostnames —
-// terminate at the proxy instead of on this host, which breaks issuance.
+// not survive it, and TLS-ALPN-01 — which is how these certificates are issued
+// — terminates at the proxy rather than at Traefik. `signoz` proxies its single
+// record; this deployment cannot.
 //
-// The wildcard is not convenience but contract: the agent-network endpoint is
-// a hostname management mints one label beneath the base domain when the
-// account bootstraps, and nothing knows that label before it exists. A record
-// per endpoint would put a converge-time fact into desired state.
+// Two explicit names rather than a wildcard. The upstream article needs a
+// wildcard because it exposes services through NetBird's own reverse proxy;
+// this package routes Authentik with Traefik directly, so nothing resolves
+// under the wildcard and publishing one would only widen the surface a future
+// catch-all router could serve.
 export function dnsJson(opts: Opts): string {
   return tofu.constructsJson([
     tofu.construct("resource", "cloudflare_dns_record", "agent_network", {
@@ -153,6 +99,7 @@ export function dnsJson(opts: Opts): string {
 }
 
 export async function dnsStep(opts: Opts): Promise<Opts> {
+  if(opts["agent-network/already-destroyed"]) return opts;
   const dir = toolDir(opts, dnsTool);
   const data: Opts = {
     ...opts,
@@ -175,7 +122,7 @@ export async function dnsStep(opts: Opts): Promise<Opts> {
 export function ansibleLocalData(opts: Opts): Opts {
   return {
     ...opts,
-    "ssh-keygen": validate.keygen(opts),
+    "ssh-keygen": (opts['colors-compute/key'] ? (opts['colors-compute/key'] as any).mode === 'managed' : validate.keygen(opts)),
     "ssh-config-identity-file": sshConfig.identityFile(opts),
   };
 }
@@ -193,6 +140,7 @@ export function ansibleLocalSpecs(opts: Opts): Spec[] {
 // Write or remove the `~/.ssh/config` block. The same playbook serves both
 // events; `block_state` is what distinguishes them.
 export async function ansibleLocalStep(opts: Opts): Promise<Opts> {
+  if(opts["agent-network/already-destroyed"]) return opts;
   const dir = toolDir(opts, ansibleLocalTool);
   const isDelete = opts["red/event"] === "delete";
   return ansible.ansibleWithSpec(opts, {
@@ -210,10 +158,6 @@ export async function ansibleLocalStep(opts: Opts): Promise<Opts> {
 
 // ---------------------------------------------------------------- ansible
 
-// Java's Double.toString, which is what Cheshire renders floats through and
-// therefore what green's committed desired.json carries (0.0001 is "1.0E-4").
-// Integral numbers print as longs. JS's shortest-round-trip digits are the
-// same digits Java chooses; only the layout differs.
 function javaNumber(value: number): string {
   if (Number.isInteger(value)) return String(value);
   const negative = value < 0;
@@ -263,7 +207,7 @@ export function inventory(opts: Opts): string {
           hosts: {
             [String(opts.profile)]: {
               ansible_host: opts.ip ?? "192.0.2.10",
-              ansible_user: "root",
+              ansible_user: opts.user ?? "root",
             },
           },
         },
@@ -328,7 +272,7 @@ export function ansibleData(opts: Opts): Opts {
     "agent-ip": validate.agentIp(opts),
     "allowed-model": validate.allowedModel(opts),
     "denied-claimed-model": validate.deniedClaimedModel(opts),
-    "ssh-keygen": validate.keygen(opts),
+    "ssh-keygen": (opts["colors-compute/key"] ? (opts["colors-compute/key"] as any).mode === "managed" : validate.keygen(opts)),
   };
 }
 
@@ -371,7 +315,7 @@ export async function ansibleStep(opts: Opts): Promise<Opts> {
     dir,
     inventory: "inventory.json",
     playbooks: { create: "main.yml", delete: "cleanup.yml" },
-    hostKeyChecking: false,
+    hostKeyChecking: false, privateKey: opts["ssh-private-key-path"] as string | undefined,
   }, ansibleSpecs(opts));
 }
 
@@ -429,8 +373,8 @@ export async function closed(host: unknown, port: number): Promise<boolean> {
 export async function sshOut(opts: Opts, command: string): Promise<string> {
   const args = [
     "ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new",
-    ...ssh.identityArgs(opts),
-    `root@${opts.ip}`, command,
+    ...(opts["ssh-private-key-path"] ? ["-i",String(opts["ssh-private-key-path"])] : []),
+    `${opts.user ?? "root"}@${opts.ip}`, command,
   ];
   return out(args);
 }

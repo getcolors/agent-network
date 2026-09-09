@@ -1,8 +1,7 @@
 """The deployment's `~/.ssh/config` block, per the workspace SSH Config Standard.
 
 The block itself is written by the `ansible-local` stage, because that is the
-one place the address is known and because `blockinfile` already handles the
-idempotent replace. What lives here is everything that must happen before the
+one place the address is known and through the canonical locked updater. What lives here is everything that must happen before the
 stage renders: the alias, the identity file, and the refusal to adopt a stanza
 this package did not write.
 
@@ -60,7 +59,7 @@ def owned_markers(alias: str) -> dict:
 
 def host_patterns(line: str) -> list[str] | None:
     """The patterns a `Host` line declares, or None when the line is not one."""
-    match = re.fullmatch(r"(?i)\s*Host\s+(.*?)\s*", str(line))
+    match = re.fullmatch(r"(?i)\s*Host(?:\s*=\s*|\s+)(.*?)\s*", str(line))
     if not match:
         return None
     return [p for p in re.split(r"\s+", match.group(1)) if p.strip()]
@@ -95,7 +94,7 @@ def leading_option_line(lines: list) -> int | None:
         trimmed = str(line).strip()
         if not trimmed or trimmed.startswith("#"):
             continue
-        if re.fullmatch(r"(?i)\s*(Host|Match)\s+.*", str(line)):
+        if re.fullmatch(r"(?i)\s*(Host|Match)(?:\s*=\s*|\s+).*", str(line)):
             return None
         return n
     return None

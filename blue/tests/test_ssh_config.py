@@ -169,4 +169,4 @@ def test_delete_removes_the_block_before_the_destroy():
     delete = {"blue/event": "delete"}
     assert workflow.wire_fn("agent-network/dns", delete)[1:] == ("agent-network/ssh-config",)
     assert workflow.wire_fn("agent-network/ssh-config", delete)[1:] == ("agent-network/infrastructure",)
-    assert workflow.wire_fn("agent-network/infrastructure", delete)[1:] == ("agent-network/ssh-cleanup",)
+    assert workflow.wire_fn("agent-network/infrastructure", delete)[1:] == ()
