@@ -22,7 +22,7 @@ both) or fails.
 ## Compute library boundary
 
 All three implementations depend directly on `colors-compute` at
-`e6318347528738267826295a2e60871263d975f2`. ONCE at
+`ae28ea74962bb1897fa6365c143c1d43ac1fe095`. ONCE at
 `a1fe1be7a427dd2e406ff7befd1c43a53e7c3618` supplies application domain helpers only.
 The library owns provider selection, required options, credentials, OpenTofu
 VM/firewall/key resources, remote R2/S3 state, identity checks, leases, and

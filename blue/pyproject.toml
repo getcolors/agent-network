@@ -5,7 +5,7 @@ description = "Blue/Python implementation of the Agent Network package"
 requires-python = ">=3.11"
 dependencies = [
     "blue",
-    "colors-compute-blue @ git+https://github.com/getcolors/colors-compute.git@e6318347528738267826295a2e60871263d975f2#subdirectory=blue",
+    "colors-compute-blue @ git+https://github.com/getcolors/colors-compute.git@ae28ea74962bb1897fa6365c143c1d43ac1fe095#subdirectory=blue",
     "package-once-blue",
 ]
 
